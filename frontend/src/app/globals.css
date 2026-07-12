@@ -1,0 +1,126 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─── Theme tokens ─────────────────────────────────────────────────────────
+   Light mode is the default (the previous white look) and is restored by
+   removing `.dark` from <html>. Dark mode is opt-in via the ThemeToggle.
+
+   Token values are copied from LiquiGuard verbatim so both apps read as
+   the same product family. The .dark override block is identical; only
+   the localStorage key (walletsync.theme) is namespaced to avoid collision
+   if both apps ever share a device. */
+:root {
+  color-scheme: light;
+  --color-base: #f8fafc;          /* slate-50 */
+  --color-surface: #ffffff;
+  --color-surface-2: #f1f5f9;     /* slate-100 */
+  --color-border: #e2e8f0;        /* slate-200 */
+  --color-ink: #0f172a;           /* slate-900 */
+  --color-muted: #64748b;         /* slate-500 */
+  --color-signal: #b45309;        /* amber-700 — readable on white */
+  --color-signal-soft: #fef3c7;   /* amber-100 */
+
+  --hairline: rgba(15, 23, 42, 0.08);
+  --page-glow: rgba(180, 83, 9, 0.04);
+  --page-glow-2: rgba(139, 127, 232, 0.04);
+
+  --selection-bg: rgba(180, 83, 9, 0.18);
+  --selection-color: #0f172a;
+}
+
+:root.dark {
+  color-scheme: dark;
+  --color-base: #0B0F14;
+  --color-surface: #151B23;
+  --color-surface-2: #1B232D;
+  --color-border: #262F3B;
+  --color-ink: #E8EAED;
+  --color-muted: #8B95A1;
+  --color-signal: #F0A93B;
+  --color-signal-soft: #3A2A12;
+
+  --hairline: rgba(255, 255, 255, 0.06);
+  --page-glow: rgba(240, 169, 59, 0.04);
+  --page-glow-2: rgba(139, 127, 232, 0.05);
+
+  --selection-bg: rgba(240, 169, 59, 0.32);
+  --selection-color: #0B0F14;
+}
+
+html, body {
+  font-family: var(--font-inter), ui-sans-serif, system-ui, -apple-system, "Noto Sans Bengali",
+               "Hind Siliguri", "Segoe UI", Roboto, sans-serif;
+}
+
+body {
+  background:
+    radial-gradient(circle at 8% 0%, var(--page-glow), transparent 32rem),
+    radial-gradient(circle at 92% 8%, var(--page-glow-2), transparent 28rem),
+    var(--color-base);
+  color: var(--color-ink);
+  min-height: 100vh;
+}
+
+::selection {
+  background: var(--selection-bg);
+  color: var(--selection-color);
+}
+
+/* Eyebrow labels — uppercase, wide-tracked, muted. */
+.eyebrow {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+}
+
+/* Monospace numerals — every balance / total gets this. */
+.num {
+  font-family: var(--font-plex-mono), ui-monospace, SFMono-Regular, monospace;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/* Hero total-balance number — WalletSync's signature, mirrors LiquiGuard's
+   hero-ttc for visual continuity. */
+.hero-total {
+  font-family: var(--font-plex-mono), ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 48px;
+  line-height: 1;
+  font-weight: 600;
+  color: var(--color-signal);
+  letter-spacing: -0.02em;
+}
+@media (min-width: 640px) {
+  .hero-total { font-size: 56px; }
+}
+
+/* Hairline provider identity rail — 2px top accent on balance cards.
+   Provider hex values stay identical across themes so the provider is
+   instantly recognisable on white and on dark. */
+.hairline-bkash  { background: linear-gradient(90deg, #E0447A, transparent); }
+.hairline-nagad  { background: linear-gradient(90deg, #E0883B, transparent); }
+.hairline-rocket { background: linear-gradient(90deg, #8B7FE8, transparent); }
+
+/* Provider dot — used in Recent Entries so each row carries the same
+   hex identity used on the card. */
+.provider-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  display: inline-block;
+}
+.provider-dot-bkash  { background: #E0447A; }
+.provider-dot-nagad  { background: #E0883B; }
+.provider-dot-rocket { background: #8B7FE8; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
