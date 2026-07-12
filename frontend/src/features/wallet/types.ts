@@ -8,7 +8,9 @@
 
 export type Provider = "bkash" | "nagad" | "rocket";
 
-export const PROVIDERS: Provider[] = ["bkash", "rocket"];
+/** All three providers are tracked. The order here defines the render
+ *  order on the dashboard (top → bottom). */
+export const PROVIDERS: Provider[] = ["bkash", "nagad", "rocket"];
 
 export const PROVIDER_LABEL: Record<Provider, string> = {
   bkash: "bKash",

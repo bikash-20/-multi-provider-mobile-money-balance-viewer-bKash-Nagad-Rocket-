@@ -121,33 +121,53 @@ interface ProviderBalanceCardProps {
 
 ---
 
-## 4. State & data model (v1, no backend)
+## 4. State & data model
 
-Use React state (`useReducer`) held at the page level, passed down. No
-`localStorage` / `sessionStorage` for app data — if persistence across reloads
-matters for the demo, that's a backend-phase concern, not v1.
+Two layers. The server (SQLite via Next.js API routes — see §8) is the
+source of truth for the entries log; the page holds a local mirror for
+the duration of a session. The mirror is what gets optimistically
+updated and rendered; the server is what gets re-fetched on mount.
+
+### 4.1 Server-side record
+
+```ts
+interface BalanceEntry {
+  id: string;          // crypto.randomUUID(), server-assigned
+  provider: "bkash" | "nagad" | "rocket";
+  balance: number;     // non-negative finite
+  timestamp: string;   // ISO 8601, server-assigned (new Date().toISOString())
+}
+```
+
+### 4.2 Client mirror
+
+```ts
+interface AppState {
+  entries: BalanceEntry[]; // append-only log, newest first
+}
+```
+
+`useReducer` at the page level. The Total Balance header and per-card
+current balances are always **derived** from the most recent entry per
+provider (see `selectors.ts`) — never stored as separate fields.
 
 > Note on `localStorage`: the spec's "no localStorage" rule applies to
 > **app data** (balance entries). Theme preference is a UI concern and is
 > permitted to persist under the `walletsync.theme` key — same category as
 > remembering a scroll position or a panel collapsed state.
 
-```ts
-interface BalanceEntry {
-  id: string;
-  provider: "bkash" | "nagad" | "rocket";
-  balance: number;
-  timestamp: string; // ISO
-}
+### 4.3 Reducer actions
 
-interface AppState {
-  entries: BalanceEntry[]; // append-only log
-  // current balance per provider = most recent entry for that provider
-}
+```ts
+type Action =
+  | { type: "set_entries"; entries: BalanceEntry[] }                 // GET result lands
+  | { type: "update_balance"; id, provider, balance, timestamp }     // optimistic append
+  | { type: "remove_entry"; id };                                    // optimistic rollback on POST failure
 ```
 
-Seed with 3 mock entries on load (one per provider, plausible BDT amounts) so
-the dashboard never looks empty on first render.
+Empty `entries: []` is the initial state — the server provides the real
+contents on first GET. Anything else here would be lying on the first
+render.
 
 ---
 
@@ -168,24 +188,130 @@ the dashboard never looks empty on first render.
 
 ## 6. Acceptance criteria
 
-- [x] Loads with 3 seeded provider balances and a non-empty Recent Entries log.
+- [x] Loads with an empty Recent Entries log on first run (the server is
+      the source of truth — no seed data is shipped).
+- [x] After typing values into the three provider cards, reloading the
+      page preserves them (proves SQLite persistence across restarts).
 - [x] Editing any one provider's balance updates: that card, the Total header,
-      and adds one row to Recent Entries.
+      and adds one row to Recent Entries — all without waiting for the
+      server (optimistic update).
+- [x] If the POST to /api/entries fails, the optimistic row is rolled back
+      and an inline error appears (graceful degradation, no half-saved state).
+- [x] Server-side validation rejects: bad provider, negative balance,
+      non-finite balance, non-object body, malformed JSON (all → 400 with
+      a human-readable message).
 - [x] Theme toggle (light / dark / system) works identically to LiquiGuard's
       implementation, no flash-of-unstyled-theme on reload.
 - [x] No console errors, no network calls to any bKash / Nagad / Rocket domain.
 - [x] Fully usable on a phone-width viewport (this is a "check my balance" app —
       mobile is the primary surface).
-- [x] No `localStorage` / `sessionStorage` used for app data in v1.
+- [x] No `localStorage` / `sessionStorage` used for app data.
 
 ---
 
-## 7. What's explicitly deferred to "backend phase"
+## 7. Still explicitly deferred (post backend phase)
 
-- Persisting entries across reloads (needs a backend + DB, mirrors LiquiGuard's
-  Postgres pattern).
-- Multi-device sync.
-- Any real provider connectivity (still not available even then — revisit only
-  if Bangladesh Bank or providers open a consumer API).
+- Multi-device sync (would need an account model — see below).
+- Any real provider connectivity (still not available — revisit only if
+  Bangladesh Bank or providers open a consumer API).
 - Auth / login (learn from LiquiGuard hackathon feedback — get this right
   early if it's added, don't bolt it on late).
+- Encryption at rest — the SQLite file is plain. Fine for a single-user
+  local app, not fine once there's any shared host.
+---
+
+## 8. Backend phase — v1.1 (this update)
+
+A minimal persistence layer so the demo survives a page reload. Single
+process, single user, no auth — the explicit scope ceiling.
+
+### 8.1 What changed
+
+- New: `frontend/src/lib/db.ts` — single swap-point for the database.
+  Cached singleton, schema bootstrap, env-overridable path.
+- New: `frontend/src/lib/entriesRepo.ts` — `listEntries()` + `appendEntry()`.
+- New: `frontend/src/app/api/entries/route.ts` — `GET` / `POST` handlers.
+- New: `frontend/scripts/db-reset.mjs` — wipe the local DB (npm script `db:reset`).
+- Updated: `frontend/src/app/page.tsx` — fetches on mount, optimistic
+  dispatch on update, rollback on POST failure.
+- Updated: `frontend/src/features/wallet/reducer.ts` — empty initial
+  state, new `set_entries` / `remove_entry` actions.
+- Updated: `frontend/src/features/wallet/ProviderBalanceCard.tsx` —
+  accepts optional `balance` / `lastUpdated` (renders "—" / "No entries yet"
+  when there's nothing to show), `disabled` / `pending` props.
+- Updated: `frontend/src/features/wallet/seed.ts` — replaced with an
+  empty module (server is authoritative; demo data is entered by hand).
+
+### 8.2 Database
+
+- Engine: **SQLite** via `better-sqlite3 ^11.3.0`. Synchronous, embedded,
+  one file, no external service.
+- Location: `<repo-root>/data/walletsync.db`. Override with the
+  `WALLETSYNC_DB_PATH` environment variable for deploy targets that
+  expose a writable volume.
+- Mode: WAL (`journal_mode = WAL`), foreign keys ON.
+- Schema:
+
+  ```sql
+  CREATE TABLE balance_entries (
+    id        TEXT PRIMARY KEY,
+    provider  TEXT NOT NULL CHECK (provider IN ('bkash','nagad','rocket')),
+    balance   REAL NOT NULL CHECK (balance >= 0),
+    timestamp TEXT NOT NULL
+  );
+  CREATE INDEX idx_balance_entries_provider_ts
+    ON balance_entries (provider, timestamp DESC);
+  ```
+
+  No `UPDATE` / `DELETE` paths exist in the app. The log is append-only
+  per the original §4 rule. The most recent row per provider is the
+  current balance.
+
+### 8.3 API surface
+
+| Method | Path           | Body                              | Response                              |
+| ------ | -------------- | --------------------------------- | ------------------------------------- |
+| GET    | `/api/entries` | —                                 | `200`, `BalanceEntry[]` (newest first) |
+| POST   | `/api/entries` | `{ provider, balance }`           | `201`, `BalanceEntry` (server-assigned id, timestamp) |
+| POST   | `/api/entries` | invalid provider / negative / non-finite balance / non-JSON / non-object | `400`, `{ error }` |
+
+The client never sets `id` or `timestamp` — both are server-generated.
+
+### 8.4 Optimistic-update flow
+
+1. User confirms a new balance.
+2. Client dispatches `update_balance` immediately (entry appears in the UI
+   with a local `id` and the current `timestamp`).
+3. Client POSTs to `/api/entries`.
+4. On `2xx`, do nothing (the local row matches what the server now has).
+5. On failure, dispatch `remove_entry` with the local `id` and show an
+   inline error banner. The optimistic row vanishes; the previous state
+   is restored.
+
+The point: the user never waits for the network. The worst-case failure
+mode is a row that briefly appeared and then disappeared, with an
+explanation. The store is never half-written.
+
+### 8.5 Out of scope (still)
+
+- No accounts, no login, no per-user rows.
+- No multi-device sync.
+- No optimistic appending from multiple tabs (would need SSE or
+  polling — both deferred).
+- No migration tooling beyond `CREATE TABLE IF NOT EXISTS`. Schema
+  changes ship as a new SQL file applied manually (the same shape
+  LiquiGuard uses).
+
+### 8.6 Local dev
+
+```bash
+cd frontend
+npm install
+npm run dev        # http://localhost:3001
+npm run db:reset   # wipes data/walletsync.db (+ -journal, -wal, -shm)
+```
+
+The SQLite file lives outside `frontend/`, so `npm run build` does not
+include it in the bundle and `.gitignore` keeps it out of git. The
+folder itself is tracked via `data/.gitkeep` so a fresh clone still
+has a place for the file to live.

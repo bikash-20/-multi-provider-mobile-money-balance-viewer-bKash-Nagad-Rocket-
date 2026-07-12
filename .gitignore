@@ -27,3 +27,9 @@ pnpm-debug.log*
 .vscode/
 .idea/
 *.swp
+# Local persistence (SQLite). Folder itself stays tracked via .gitkeep
+# so a fresh clone preserves the path; only the DB files are excluded.
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm

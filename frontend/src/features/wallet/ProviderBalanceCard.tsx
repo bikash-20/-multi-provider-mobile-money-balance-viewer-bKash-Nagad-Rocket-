@@ -3,19 +3,17 @@
  * ProviderBalanceCard — one card per provider.
  *
  * Behavior (per WalletSync spec section 3.2 + 5):
- *  - Renders the current balance as a large numeral.
+ *  - Renders the current balance as a large numeral, or an "—" placeholder
+ *    if no entry exists yet.
  *  - "Update balance" / tapping the numeral turns it into an editable
- *    numeric input, pre-filled with the current value.
- *  - Confirm (checkmark or Enter) appends a new BalanceEntry and exits
- *    edit mode.
+ *    numeric input, pre-filled with the current value (or empty if none).
+ *  - Confirm (checkmark or Enter) calls onUpdate and exits edit mode.
  *  - Cancel (X or Escape) reverts to display state with no mutation.
  *  - Negative numbers and non-numeric input are rejected inline; the
  *    submit affordance is disabled until the value parses to a
  *    non-negative finite number.
- *
- * The card receives the current balance + timestamp from the parent so
- * the parent can re-render the Total header from the same source of
- * truth. The card itself owns only its local edit-mode UI state.
+ *  - `disabled` disables the "Update balance" trigger (used during the
+ *    initial fetch). `pending` visually marks an in-flight POST.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -29,9 +27,11 @@ import { formatBDT, formatRelative } from "@/lib/time";
 
 interface ProviderBalanceCardProps {
   provider: Provider;
-  balance: number;
-  lastUpdated: string;
+  balance?: number;
+  lastUpdated?: string;
   onUpdate: (newBalance: number) => void;
+  disabled?: boolean;
+  pending?: boolean;
 }
 
 type ValidationError = "empty" | "negative" | "nan" | null;
@@ -56,9 +56,11 @@ export function ProviderBalanceCard({
   balance,
   lastUpdated,
   onUpdate,
+  disabled = false,
+  pending = false,
 }: ProviderBalanceCardProps) {
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState<string>(balance.toString());
+  const [draft, setDraft] = useState<string>(balance?.toString() ?? "");
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Focus + select on entry so the user can type to overwrite.
@@ -73,12 +75,13 @@ export function ProviderBalanceCard({
   const canSubmit = value !== null && error === null;
 
   function startEdit() {
-    setDraft(balance.toString());
+    if (disabled) return;
+    setDraft(balance?.toString() ?? "");
     setEditing(true);
   }
 
   function cancel() {
-    setDraft(balance.toString());
+    setDraft(balance?.toString() ?? "");
     setEditing(false);
   }
 
@@ -118,12 +121,20 @@ export function ProviderBalanceCard({
               aria-hidden
             />
             <span className="eyebrow">{PROVIDER_LABEL[provider]}</span>
+            {pending && (
+              <span
+                aria-hidden
+                className="ml-2 inline-block h-2 w-2 animate-pulse rounded-full bg-signal"
+                title="Saving…"
+              />
+            )}
           </div>
           {!editing && (
             <button
               type="button"
               onClick={startEdit}
-              className="rounded-md border border-border bg-surface-2 px-2.5 py-1 text-xs font-semibold text-ink transition hover:border-signal hover:text-signal"
+              disabled={disabled}
+              className="rounded-md border border-border bg-surface-2 px-2.5 py-1 text-xs font-semibold text-ink transition hover:border-signal hover:text-signal disabled:cursor-not-allowed disabled:opacity-50"
               aria-label={`Update ${PROVIDER_LABEL[provider]} balance`}
             >
               Update balance
@@ -183,14 +194,21 @@ export function ProviderBalanceCard({
             <button
               type="button"
               onClick={startEdit}
-              className="block w-full text-left transition hover:opacity-80"
-              aria-label={`Current balance ${formatBDT(balance)}. Tap to update.`}
+              disabled={disabled}
+              className="block w-full text-left transition hover:opacity-80 disabled:cursor-not-allowed"
+              aria-label={
+                balance !== undefined
+                  ? `Current balance ${formatBDT(balance)}. Tap to update.`
+                  : `No balance recorded yet for ${PROVIDER_LABEL[provider]}. Tap to add one.`
+              }
             >
               <span className="num block text-3xl font-semibold text-ink sm:text-4xl">
-                {formatBDT(balance)}
+                {balance !== undefined ? formatBDT(balance) : "—"}
               </span>
               <span className="mt-1 block text-xs text-muted">
-                Updated {formatRelative(lastUpdated) || "moments ago"}
+                {lastUpdated
+                  ? `Updated ${formatRelative(lastUpdated) || "moments ago"}`
+                  : "No entries yet"}
               </span>
             </button>
           )}
