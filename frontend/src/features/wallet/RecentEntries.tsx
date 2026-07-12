@@ -22,9 +22,14 @@ interface RecentEntriesProps {
   /** Map of provider → previous balance before the most recent update
    *  for that provider. Used to render the "old → new" delta. */
   previousByProvider: Record<string, number | undefined>;
+  /** IDs of rows that should slide in on first paint. Caller adds to
+   *  this set when an entry is optimistically dispatched; we play the
+   *  animation only on initial appearance (not on every re-render of
+   *  an existing row). */
+  freshIds?: ReadonlySet<string>;
 }
 
-export function RecentEntries({ entries, previousByProvider }: RecentEntriesProps) {
+export function RecentEntries({ entries, previousByProvider, freshIds }: RecentEntriesProps) {
   const [open, setOpen] = useState(true);
 
   return (
@@ -61,7 +66,7 @@ export function RecentEntries({ entries, previousByProvider }: RecentEntriesProp
                 return (
                   <li
                     key={e.id}
-                    className="flex items-center gap-3 px-4 py-3 sm:px-5"
+                    className={`flex items-center gap-3 px-4 py-3 sm:px-5${freshIds?.has(e.id) ? " log-row-enter" : ""}`}
                   >
                     <span
                       className="inline-block h-2 w-2 flex-none rounded-full"

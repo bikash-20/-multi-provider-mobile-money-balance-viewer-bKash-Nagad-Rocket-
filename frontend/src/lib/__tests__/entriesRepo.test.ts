@@ -93,12 +93,14 @@ describe("entriesRepo", () => {
   });
 
   it("appendEntry + listEntries round-trip preserves order", async () => {
-    await withTempDb(() => {
+    await withTempDb(async () => {
       appendEntry("bkash", 100);
-      // Sleep one tick so the second entry has a strictly greater
-      // timestamp; better-sqlite3 timestamps are millisecond-precision
+      // Sleep one ms so subsequent entries have strictly greater
+      // timestamps; better-sqlite3 timestamps are millisecond-precision
       // strings and can collide on very fast machines.
+      await new Promise((r) => setTimeout(r, 2));
       const a = appendEntry("nagad", 200);
+      await new Promise((r) => setTimeout(r, 2));
       const b = appendEntry("rocket", 300);
 
       const all = listEntries();

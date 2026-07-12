@@ -24,6 +24,10 @@ import {
   type Provider,
 } from "./types";
 import { formatBDT, formatRelative } from "@/lib/time";
+import { Sparkline } from "./Sparkline";
+import { DeltaPctBadge } from "./DeltaPctBadge";
+import { useCountUp } from "./useCountUp";
+import type { DailyPoint } from "@/lib/sparklineSeries";
 
 interface ProviderBalanceCardProps {
   provider: Provider;
@@ -32,6 +36,9 @@ interface ProviderBalanceCardProps {
   onUpdate: (newBalance: number) => void;
   disabled?: boolean;
   pending?: boolean;
+  /** Last `windowDays` of points for this provider. Optional — the
+   *  card stays useful without a sparkline. */
+  series?: ReadonlyArray<DailyPoint>;
 }
 
 type ValidationError = "empty" | "negative" | "nan" | null;
@@ -58,6 +65,7 @@ export function ProviderBalanceCard({
   onUpdate,
   disabled = false,
   pending = false,
+  series,
 }: ProviderBalanceCardProps) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<string>(balance?.toString() ?? "");
@@ -72,6 +80,11 @@ export function ProviderBalanceCard({
   }, [editing]);
 
   const { value, error } = validate(draft);
+
+  // Animated display value. Snap to the live `balance` while editing or
+  // when balance is undefined (no card yet) so the empty-state copy
+  // stays the same.
+  const displayBalance = useCountUp(balance ?? 0);
   const canSubmit = value !== null && error === null;
 
   function startEdit() {
@@ -202,14 +215,37 @@ export function ProviderBalanceCard({
                   : `No balance recorded yet for ${PROVIDER_LABEL[provider]}. Tap to add one.`
               }
             >
-              <span className="num block text-3xl font-semibold text-ink sm:text-4xl">
-                {balance !== undefined ? formatBDT(balance) : "—"}
-              </span>
-              <span className="mt-1 block text-xs text-muted">
-                {lastUpdated
-                  ? `Updated ${formatRelative(lastUpdated) || "moments ago"}`
-                  : "No entries yet"}
-              </span>
+              <div className="flex items-end justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <span className="num block text-3xl font-semibold text-ink sm:text-4xl">
+                    {balance !== undefined ? formatBDT(displayBalance) : "—"}
+                  </span>
+                  <div className="mt-1 flex items-center gap-2">
+                    <span className="block text-xs text-muted">
+                      {lastUpdated
+                        ? `Updated ${formatRelative(lastUpdated) || "moments ago"}`
+                        : "No entries yet"}
+                    </span>
+                    {balance !== undefined && (
+                      <DeltaPctBadge
+                        points={series ?? []}
+                        windowDays={7}
+                      />
+                    )}
+                  </div>
+                </div>
+                {series && series.length > 0 && (
+                  <div className="flex-none self-end pb-1">
+                    <Sparkline
+                      points={series}
+                      color={PROVIDER_HEX[provider]}
+                      width={88}
+                      height={32}
+                      ariaLabel={`${PROVIDER_LABEL[provider]} balance trend`}
+                    />
+                  </div>
+                )}
+              </div>
             </button>
           )}
         </div>

@@ -12,6 +12,13 @@
  *    for that provider (selectors), never stored separately.
  *  - Total Balance is derived from those three current balances, never
  *    stored separately. Eliminates drift between header and cards.
+ *
+ * Phase 5 polish (investor demo):
+ *  - Per-card sparkline + 7d delta badge via Sparkline / DeltaPctBadge.
+ *  - Count-up animation on totals + balances via useCountUp.
+ *  - Skeleton placeholders during initial load.
+ *  - Slide-in animation for optimistically-added entries.
+ *  - Demo badge + persona switcher in AppShell (loaded via /api/meta).
  */
 
 import { useCallback, useEffect, useMemo, useReducer, useState } from "react";
@@ -19,6 +26,7 @@ import { AppShell } from "@/features/shell/AppShell";
 import { TotalBalanceHeader } from "@/features/wallet/TotalBalanceHeader";
 import { ProviderBalanceCard } from "@/features/wallet/ProviderBalanceCard";
 import { RecentEntries } from "@/features/wallet/RecentEntries";
+import { Skeleton } from "@/features/wallet/Skeleton";
 import { initialState, reducer } from "@/features/wallet/reducer";
 import {
   grandTotal,
@@ -26,6 +34,11 @@ import {
   latestFor,
 } from "@/features/wallet/selectors";
 import { PROVIDERS, type BalanceEntry, type Provider } from "@/features/wallet/types";
+import {
+  buildDailySeries,
+  type DailyPoint,
+} from "@/lib/sparklineSeries";
+import type { MetaSnapshot } from "@/lib/metaTypes";
 
 function makeId(): string {
   // crypto.randomUUID exists in modern browsers + Node 19+; fallback
@@ -41,22 +54,37 @@ interface PendingUpdate {
   provider: Provider;
 }
 
+const SPARK_WINDOW_DAYS = 30;
+
 export default function HomePage() {
   const [state, dispatch] = useReducer(reducer, initialState);
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState<Record<string, PendingUpdate>>({});
   const [error, setError] = useState<string | null>(null);
+  const [freshIds, setFreshIds] = useState<Set<string>>(new Set());
+  const [meta, setMeta] = useState<MetaSnapshot | null>(null);
 
-  // Initial fetch — server is the source of truth.
+  // Initial fetch — server is the source of truth. Both /api/entries
+  // and /api/meta fire in parallel; whichever resolves first paints
+  // its piece.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch("/api/entries", { cache: "no-store" });
-        if (!res.ok) throw new Error(`GET /api/entries returned ${res.status}`);
-        const entries = (await res.json()) as BalanceEntry[];
+        const [entriesRes, metaRes] = await Promise.all([
+          fetch("/api/entries", { cache: "no-store" }),
+          fetch("/api/meta", { cache: "no-store" }),
+        ]);
+        if (!entriesRes.ok) {
+          throw new Error(`GET /api/entries returned ${entriesRes.status}`);
+        }
+        const entries = (await entriesRes.json()) as BalanceEntry[];
+        const snapshot: MetaSnapshot | null = metaRes.ok
+          ? ((await metaRes.json()) as MetaSnapshot)
+          : null;
         if (!cancelled) {
           dispatch({ type: "set_entries", entries });
+          setMeta(snapshot);
           setLoading(false);
         }
       } catch (err) {
@@ -94,6 +122,14 @@ export default function HomePage() {
     return result;
   }, [state.entries]);
 
+  // One daily series per provider, recomputed on entries change.
+  const seriesByProvider = useMemo(() => {
+    const all = buildDailySeries(state.entries, SPARK_WINDOW_DAYS);
+    const map = {} as Record<Provider, ReadonlyArray<DailyPoint>>;
+    for (const s of all) map[s.provider] = s.points;
+    return map;
+  }, [state.entries]);
+
   const handleUpdate = useCallback(
     async (provider: Provider, newBalance: number) => {
       const id = makeId();
@@ -106,6 +142,22 @@ export default function HomePage() {
         timestamp,
         id,
       });
+      // Mark this id as freshly-added so the row plays its slide-in
+      // animation. Clear after a tick so subsequent re-renders don't
+      // replay it.
+      setFreshIds((prev) => {
+        const next = new Set(prev);
+        next.add(id);
+        return next;
+      });
+      setTimeout(() => {
+        setFreshIds((prev) => {
+          if (!prev.has(id)) return prev;
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+      }, 320);
       setPending((p) => ({ ...p, [provider]: { id, provider } }));
       setError(null);
 
@@ -139,41 +191,81 @@ export default function HomePage() {
     [],
   );
 
+  // After a persona switch, refetch entries (the server just wiped +
+  // reseeded) and update the meta snapshot.
+  const handlePersonaSwitched = useCallback((snapshot: MetaSnapshot) => {
+    setMeta(snapshot);
+    setLoading(true);
+    (async () => {
+      try {
+        const res = await fetch("/api/entries", { cache: "no-store" });
+        if (!res.ok) throw new Error(`GET /api/entries returned ${res.status}`);
+        const entries = (await res.json()) as BalanceEntry[];
+        dispatch({ type: "set_entries", entries });
+        setError(null);
+      } catch (err) {
+        setError(
+          err instanceof Error
+            ? `Couldn't load new entries: ${err.message}`
+            : "Couldn't load new entries.",
+        );
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
   return (
-    <AppShell>
+    <AppShell meta={meta} onPersonaSwitched={handlePersonaSwitched}>
       <div className="flex flex-col gap-4 sm:gap-5">
-        <TotalBalanceHeader total={total} lastUpdatedAt={updatedAt} />
+        {loading ? (
+          <>
+            <Skeleton className="h-[120px] sm:h-[140px]" label="Loading total balance" />
+            <div className="flex flex-col gap-3 sm:gap-4">
+              {PROVIDERS.map((p) => (
+                <Skeleton key={p} className="h-[112px]" label={`Loading ${p} balance`} />
+              ))}
+            </div>
+            <Skeleton className="h-[180px]" label="Loading recent entries" />
+          </>
+        ) : (
+          <>
+            <TotalBalanceHeader total={total} lastUpdatedAt={updatedAt} />
 
-        {error && (
-          <div
-            role="alert"
-            className="rounded-lg border border-signal/40 bg-signal-soft/60 px-3 py-2 text-sm text-ink"
-          >
-            {error}
-          </div>
+            {error && (
+              <div
+                role="alert"
+                className="rounded-lg border border-signal/40 bg-signal-soft/60 px-3 py-2 text-sm text-ink"
+              >
+                {error}
+              </div>
+            )}
+
+            <div className="flex flex-col gap-3 sm:gap-4">
+              {PROVIDERS.map((p) => {
+                const latest = latestFor(state, p);
+                return (
+                  <ProviderBalanceCard
+                    key={p}
+                    provider={p}
+                    balance={latest?.balance}
+                    lastUpdated={latest?.timestamp}
+                    disabled={false}
+                    pending={Boolean(pending[p])}
+                    onUpdate={(newBalance) => handleUpdate(p, newBalance)}
+                    series={seriesByProvider[p]}
+                  />
+                );
+              })}
+            </div>
+
+            <RecentEntries
+              entries={state.entries}
+              previousByProvider={previousByProvider}
+              freshIds={freshIds}
+            />
+          </>
         )}
-
-        <div className="flex flex-col gap-3 sm:gap-4">
-          {PROVIDERS.map((p) => {
-            const latest = latestFor(state, p);
-            return (
-              <ProviderBalanceCard
-                key={p}
-                provider={p}
-                balance={latest?.balance}
-                lastUpdated={latest?.timestamp}
-                disabled={loading}
-                pending={Boolean(pending[p])}
-                onUpdate={(newBalance) => handleUpdate(p, newBalance)}
-              />
-            );
-          })}
-        </div>
-
-        <RecentEntries
-          entries={state.entries}
-          previousByProvider={previousByProvider}
-        />
       </div>
     </AppShell>
   );

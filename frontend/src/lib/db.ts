@@ -51,6 +51,10 @@ function initSchema(db: DB): void {
   // matches the original spec's "log is append-only" rule (WALLETSYNC_SPEC
   // §4). The most recent row per provider is the current balance; older
   // rows are kept for the Recent Entries view.
+  //
+  // `meta` is a small KV table used by the seed script to record demo
+  // persona metadata (label, generation timestamp, demo flag). Created
+  // here so the app's schema and the seeder's schema stay in lock-step.
   db.exec(`
     CREATE TABLE IF NOT EXISTS balance_entries (
       id          TEXT PRIMARY KEY,
@@ -60,6 +64,11 @@ function initSchema(db: DB): void {
     );
     CREATE INDEX IF NOT EXISTS idx_balance_entries_provider_ts
       ON balance_entries (provider, timestamp DESC);
+
+    CREATE TABLE IF NOT EXISTS meta (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
   `);
 }
 

@@ -124,3 +124,56 @@ body {
     animation-iteration-count: 1 !important;
   }
 }
+
+/* ─── Phase-5 polish: skeleton, sparkline, slide-in ─────────────────
+   Each block sets up a single purpose-built animation, then opts out
+   under prefers-reduced-motion so the experience is static-but-correct
+   for users who've asked the OS to slow things down. */
+
+/* Skeleton shimmer — a soft left→right sheen for loading placeholders.
+   The mask keeps the sheen inside the rounded rectangle, so the
+   placeholder reads as a solid block with motion rather than a
+   striped pattern. */
+.skeleton-shimmer {
+  background-color: var(--color-surface-2);
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--color-border) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  background-repeat: no-repeat;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes skeleton-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-shimmer { animation: none; }
+}
+
+/* Sparkline entrance — a 350ms fade so the line doesn't just pop in
+   when the dataset swaps (e.g. after persona switch). Opt-out via
+   .motion-respects → global reduce. */
+.motion-respects { animation: sparkline-fade-in 350ms ease-out; }
+@keyframes sparkline-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .motion-respects { animation: none; }
+}
+
+/* Recent-entries slide-in — when the page mounts or a new entry is
+   appended, each row animates in. Used on the optimistic-add path so
+   users see confirmation their tap registered. */
+.log-row-enter { animation: log-row-slide-in 280ms ease-out; }
+@keyframes log-row-slide-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .log-row-enter { animation: none; }
+}
