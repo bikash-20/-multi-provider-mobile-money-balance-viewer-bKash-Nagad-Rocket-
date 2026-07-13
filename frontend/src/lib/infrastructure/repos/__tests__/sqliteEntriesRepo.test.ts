@@ -208,4 +208,40 @@ describe("SqliteEntriesRepo", () => {
       expect(all[1]?.id).toBe(a.id);
     });
   });
+
+  it("retries optimistic-lock conflicts and eventually succeeds", async () => {
+    await withTempDb(async () => {
+      const db = getDb();
+      seedPersona(db);
+      const repo = new SqliteEntriesRepo(db);
+
+      // First append establishes version_id=2 (lazy init = version 1,
+      // then the UPDATE bumps it).
+      await repo.appendEntry("bkash", 100);
+
+      // Simulate a concurrent writer by bumping version_id twice
+      // between the first read and the next append. The appendEntry's
+      // retry loop should restart the read on conflict and succeed on
+      // a later attempt.
+      const bumpVersion = db.prepare(
+        `UPDATE provider_balance
+            SET version_id = version_id + 1, updated_at = ?
+          WHERE persona_id = ? AND provider_id = 'bkash'`,
+      );
+      bumpVersion.run(Date.now(), PERSONA);
+      bumpVersion.run(Date.now(), PERSONA);
+
+      const entry = await repo.appendEntry("bkash", 250);
+      expect(entry.balance).toBe(250);
+      expect(entry.provider).toBe("bkash");
+      // The retry path always lands on the eventual successful write.
+      const finalRow = db
+        .prepare(
+          `SELECT balance FROM provider_balance
+             WHERE persona_id = ? AND provider_id = 'bkash'`,
+        )
+        .get(PERSONA) as { balance: number };
+      expect(finalRow.balance).toBe(250);
+    });
+  });
 });

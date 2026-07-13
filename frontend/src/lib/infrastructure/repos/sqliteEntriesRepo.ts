@@ -20,11 +20,39 @@
  */
 import type { Database as DB } from "better-sqlite3";
 import { withTransaction } from "@/lib/infrastructure/transaction";
+import { runWithRetry, type RetryPolicy } from "@/lib/infrastructure/retry";
 import type { EntriesRepo } from "@/lib/domain/repositories/entriesRepo";
 import type {
   BalanceEntry,
   Provider,
 } from "@/features/wallet/types";
+
+/** Marker for optimistic-lock conflicts inside v2 writes. Phase 5
+ *  retry hook re-throws this so the jittered retry loop can pick it
+ *  up without re-running the cold-start persona provisioning. */
+class BalanceConflictError extends Error {
+  constructor(
+    readonly personaId: string,
+    readonly provider: Provider,
+  ) {
+    super(`balance write conflict for ${personaId}/${provider}; retry`);
+    this.name = "BalanceConflictError";
+  }
+}
+
+/** Two of the appends in a row should never see the same race twice,
+ *  so a 5-attempt policy is plenty: each retry backs off by ~factor
+ *  but the total budget is capped so we never block the request for
+ *  more than a few hundred ms. */
+const APPEND_RETRY_POLICY: Partial<RetryPolicy> = {
+  maxAttempts: 5,
+  baseDelayMs: 20,
+  maxTotalMs: 500,
+  factor: 2,
+};
+
+const isBalanceConflict = (e: unknown): boolean =>
+  e instanceof BalanceConflictError;
 
 interface V2Row {
   id: number;
@@ -119,6 +147,9 @@ export class SqliteEntriesRepo implements EntriesRepo {
 
   appendEntry(provider: Provider, balance: number): Promise<BalanceEntry> {
     // Cold-start append: lazily create the default persona + balances.
+    // This must run before the retry loop because the persona + the
+    // initial provider_balance rows need to exist before any optimistic
+    // UPDATE can succeed.
     let personaId = readActivePersona(this.db);
     if (!personaId) {
       personaId = DEFAULT_PERSONA;
@@ -128,9 +159,11 @@ export class SqliteEntriesRepo implements EntriesRepo {
         .run("active_persona", personaId);
     }
 
-    // Read current version + balance for the optimistic lock. If the row
-    // is missing (persona exists but no provider_balance row), seed it
-    // with the same default-opening value used by the seeder.
+    // If the persona row exists but the per-provider row hasn't been
+    // seeded yet, write it with the requested balance + version 1.
+    // This is a one-shot INSERT outside the retry loop; it either
+    // commits or it conflicts (e.g. two clients racing to first-write)
+    // and the binding below re-reads + proceeds.
     const cur = this.db
       .prepare<
         [string, Provider],
@@ -150,56 +183,59 @@ export class SqliteEntriesRepo implements EntriesRepo {
         .run(personaId, provider, balance, Date.now());
     }
 
-    const ts = Date.now();
-    const result = withTransaction(this.db, () => {
-      // Re-read inside the transaction to close the read/write gap.
-      const fresh = this.db
-        .prepare<
-          [string, Provider],
-          { balance: number; version_id: number }
-        >(
-          `SELECT balance, version_id FROM provider_balance
-           WHERE persona_id = ? AND provider_id = ?`,
-        )
-        .get(personaId!, provider)!;
-      const upd = this.db
-        .prepare(
-          `UPDATE provider_balance
-           SET balance    = ?,
-               version_id = version_id + 1,
-               updated_at = ?
-           WHERE persona_id  = ?
-             AND provider_id = ?
-             AND version_id  = ?`,
-        )
-        .run(balance, ts, personaId!, provider, fresh.version_id);
-      if (upd.changes !== 1) {
-        // Someone else wrote in between; the v1 contract has no
-        // conflict-recovery surface, so we surface a generic error and
-        // let the client retry. (Future Phase 5: a BalanceConflictError
-        // + jittered retry, mirroring LiquiGuard.)
-        throw new Error(
-          `balance write conflict for ${personaId}/${provider}; retry`,
-        );
-      }
-      const ins = this.db
-        .prepare(
-          `INSERT INTO balance_entries
-             (persona_id, provider_id, balance, source, transfer_id, ts)
-           VALUES (?, ?, ?, 'manual', NULL, ?)`,
-        )
-        .run(personaId!, provider, balance, ts);
-      const id = Number(ins.lastInsertRowid);
-      return hydrate({
-        id,
-        persona_id: personaId!,
-        provider_id: provider,
-        balance,
-        source: "manual",
-        transfer_id: null,
-        ts,
-      });
-    });
-    return Promise.resolve(result);
+    const db = this.db;
+    const pid = personaId;
+
+    return runWithRetry(
+      () => {
+        const ts = Date.now();
+        return withTransaction(db, () => {
+          // Re-read inside the transaction to close the read/write gap.
+          const fresh = db
+            .prepare<
+              [string, Provider],
+              { balance: number; version_id: number }
+            >(
+              `SELECT balance, version_id FROM provider_balance
+               WHERE persona_id = ? AND provider_id = ?`,
+            )
+            .get(pid, provider)!;
+          const upd = db
+            .prepare(
+              `UPDATE provider_balance
+               SET balance    = ?,
+                   version_id = version_id + 1,
+                   updated_at = ?
+               WHERE persona_id  = ?
+                 AND provider_id = ?
+                 AND version_id  = ?`,
+            )
+            .run(balance, ts, pid, provider, fresh.version_id);
+          if (upd.changes !== 1) {
+            // Optimistic-lock conflict — the retry loop above decides
+            // whether to back off + try again or surface to the caller.
+            throw new BalanceConflictError(pid, provider);
+          }
+          const ins = db
+            .prepare(
+              `INSERT INTO balance_entries
+                 (persona_id, provider_id, balance, source, transfer_id, ts)
+               VALUES (?, ?, ?, 'manual', NULL, ?)`,
+            )
+            .run(pid, provider, balance, ts);
+          return hydrate({
+            id: Number(ins.lastInsertRowid),
+            persona_id: pid,
+            provider_id: provider,
+            balance,
+            source: "manual",
+            transfer_id: null,
+            ts,
+          });
+        });
+      },
+      isBalanceConflict,
+      APPEND_RETRY_POLICY,
+    );
   }
 }
