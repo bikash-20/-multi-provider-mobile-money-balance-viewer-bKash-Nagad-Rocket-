@@ -51,12 +51,7 @@ services:
         value: --max-old-space-size=384
     healthCheckPath: /api/health
     autoDeploy: true                 # redeploy on every push to main
-
-# Persistent disk — REQUIRED for SQLite. The deploy will fail to keep
-# data across restarts without it (and crashes on a cold start if the
-# parent dir doesn't exist). 1 GB is plenty for the demo;
-# the demo writes < 5 MB even after heavy seeding.
-diskConfigs:
-  - name: walletsync-data
-    mountPath: /var/data
-    sizeGB: 1
+    disk:                            # REQUIRED for SQLite — see docs/09_DEPLOYMENT.md
+      name: walletsync-data
+      mountPath: /var/data
+      sizeGB: 1
