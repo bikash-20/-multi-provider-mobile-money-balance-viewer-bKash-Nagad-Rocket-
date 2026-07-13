@@ -30,6 +30,7 @@ import Database from "better-sqlite3";
 
 import { migrate } from "@/lib/infrastructure/migrate";
 import { PROVIDERS, type Provider } from "@/features/wallet/types";
+import { bdtToPaise } from "@/lib/domain/money";
 
 type DB = InstanceType<typeof Database>;
 
@@ -323,12 +324,14 @@ export function seedDemo(
 
     const tx = db.transaction(() => {
       // 1. Persona row (id matches the persona name).
+      //    The opening_* columns are typed paise; convert from BDT
+      //    (which is what `config.baseline` carries) to paise here.
       upsertPersona.run(
         config.name,
         config.label,
-        config.baseline.bkash,
-        config.baseline.nagad,
-        config.baseline.rocket,
+        bdtToPaise(config.baseline.bkash),
+        bdtToPaise(config.baseline.nagad),
+        bdtToPaise(config.baseline.rocket),
       );
 
       // 2. Wipe any prior entries for this persona only.
@@ -346,14 +349,27 @@ export function seedDemo(
         }
       }
       // 4. Reset provider_balance to the current snapshot.
+      //    `provider_balance.balance` and `balance_entries.balance` are
+      //    typed INTEGER paise; `lastByProvider[p]` and `e.balance` are
+      //    in BDT here, so convert before writing.
       const t = Date.now();
       for (const p of PROVIDERS) {
-        upsertBalance.run(config.name, p, lastByProvider[p], t);
+        upsertBalance.run(
+          config.name,
+          p,
+          bdtToPaise(lastByProvider[p] as number),
+          t,
+        );
       }
 
       // 5. Insert the history rows.
       for (const e of entries) {
-        insertEntry.run(config.name, e.provider, e.balance, e.timestamp);
+        insertEntry.run(
+          config.name,
+          e.provider,
+          bdtToPaise(e.balance),
+          e.timestamp,
+        );
       }
 
       // 6. Demo metadata + active_persona marker so the entries repo

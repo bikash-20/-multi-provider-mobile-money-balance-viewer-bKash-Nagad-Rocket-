@@ -128,6 +128,44 @@ describe("POST /api/transfers", () => {
       });
     });
 
+    it("accepts a transfer whose amount is smaller than the source balance (regression: insufficient-balance unit-mismatch)", async () => {
+      // Regression for the unit-mismatch bug. The route's
+      // insufficient-balance pre-check must compare both sides in
+      // the same unit. This test seeds paise-shaped balances and
+      // posts a transfer whose amount (in paise) is comfortably
+      // smaller than the source balance; the check must pass and the
+      // commit must return 201 with the amount stored as paise.
+      // Under the old buggy code paths — either a raw
+      // `row.balance < amountPaise` with mixed units, or any other
+      // shape where amount and balance disagree — this assertion
+      // would have failed.
+      await withTempDb(async () => {
+        // rocket: 1_000_000 paise (৳10,000); asking ৳800 = 80_000 paise.
+        seedPersona({ bkash: 500_000, nagad: 200_000, rocket: 1_000_000 });
+        const res = await POST(
+          makeJsonRequest({ from: "rocket", to: "bkash", amountBdt: 800 }),
+        );
+        expect(res.status).toBe(201);
+        const body = (await res.json()) as {
+          transfer: {
+            amountBdt: number;
+            fromProvider: string;
+            toProvider: string;
+            fromAfter: number;
+            toAfter: number;
+          };
+        };
+        expect(body.transfer.fromProvider).toBe("rocket");
+        expect(body.transfer.toProvider).toBe("bkash");
+        // amount is stored as paise: 800 BDT = 80_000 paise.
+        expect(body.transfer.amountBdt).toBe(80_000);
+        // 1_000_000 paise - 80_000 paise = 920_000 paise (৳9,200).
+        expect(body.transfer.fromAfter).toBe(920_000);
+        // 500_000 paise + 80_000 paise = 580_000 paise (৳5,800).
+        expect(body.transfer.toAfter).toBe(580_000);
+      });
+    });
+
     it("replay-safely returns 201 with the original row when the same body is POSTed twice", async () => {
       // The PK on transfer_id makes a true server-side retry a no-op.
       // Two POSTs from the same client produce *different* ids, so this

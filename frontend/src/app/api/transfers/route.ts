@@ -314,11 +314,18 @@ export async function POST(req: Request) {
   //    SQLite CHECK(balance>=0) violation, which would surface as a
   //    generic 409. A 422 with a precise message is more helpful and
   //    keeps the 409 channel reserved for *real* optimistic-lock races.
+  //
+  //    Unit note: `fromRow.balance` is typed `Paise` and the v1 seeder
+  //    has been fixed to write paise into this column, so both sides
+  //    are paise and the comparison is apples-to-apples. Legacy rows
+  //    written before the fix are taka-shaped; re-seed (`npm run
+  //    db:reset && npm run db:seed`) to recover a consistent DB.
   const amountPaise = bdtToPaise(amountBdt);
-  if ((fromRow.balance as number) < (amountPaise as number)) {
+  if ((fromRow.balance as number) < amountPaise) {
+    const havePaise = fromRow.balance as number;
     return NextResponse.json(
       {
-        error: `Insufficient balance in ${from}: have ${fromRow.balance} paise, need ${amountPaise} paise.`,
+        error: `Insufficient balance in ${from}: have ${havePaise} paise (৳${(havePaise / 100).toFixed(2)}), need ${amountPaise} paise (৳${(amountPaise / 100).toFixed(2)}).`,
       },
       { status: 422 },
     );
