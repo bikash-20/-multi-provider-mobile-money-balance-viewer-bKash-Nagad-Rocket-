@@ -1,0 +1,23 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "nextjs",
+  "buildCommand": "cd frontend && npm ci && npm run build",
+  "installCommand": "cd frontend && npm ci",
+
+  "github": {
+    "silent": true
+  },
+
+  "build": {
+    "env": {
+      "NODE_ENV": "production"
+    }
+  },
+
+  "functions": {
+    "frontend/src/app/api/**/*.ts": {
+      "runtime": "nodejs20.x",
+      "maxDuration": 10
+    }
+  }
+}

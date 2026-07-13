@@ -1,0 +1,62 @@
+# render.yaml — WalletSync deploy blueprint for Render.
+#
+# ⚠️ Why Render is the recommended host:
+#   WalletSync ships with a bundled SQLite file under `data/`. SQLite
+#   is a single-file embedded database: the serverless function model
+#   used by Vercel/Netlify Functions/Cloud Run (request-isolated
+#   container with an ephemeral, often read-only, filesystem) cannot
+#   reliably persist writes between requests. Render's Web Service
+#   runs a long-lived Node process with a mounted persistent disk,
+#   which is what SQLite needs.
+#
+# How to use:
+#   1. Push this repo to GitHub.
+#   2. Click "New +" → "Blueprint" in the Render dashboard.
+#   3. Paste the GitHub repo URL; Render reads this file.
+#   4. Render provisions the web service AND the persistent disk
+#      automatically. First deploy will seed an empty DB;
+#      `npm run db:seed` after deploy if you want demo data.
+#
+# Or one-click:
+#   https://render.com/deploy?repo=https://github.com/bikash-20/-multi-provider-mobile-money-balance-viewer-bKash-Nagad-Rocket-
+#
+# Health check: Render pings /api/health every 30s; a non-200 (or 503
+# "down") flips the instance to "crashed loopback" and restarts it.
+
+services:
+  - type: web
+    name: walletsync
+    runtime: node
+    plan: free           # fine for the demo; bump to "starter" for production
+    region: oregon        # cheapest free-tier region
+    branch: main
+    buildCommand: |
+      cd frontend
+      npm ci
+      npm run build
+    startCommand: |
+      cd frontend
+      npm run db:seed || true      # idempotent — only seeds on a fresh DB
+      npm run start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000                # Render injects $PORT at runtime; we honor it in package.json via ${PORT:-3001}
+      - key: WALLETSYNC_DB_PATH
+        value: /var/data/walletsync.db
+      # SQLite tuning — Render free instances have 512MB RAM; these keep us
+      # under that and avoid surprise OOMs.
+      - key: NODE_OPTIONS
+        value: --max-old-space-size=384
+    healthCheckPath: /api/health
+    autoDeploy: true                 # redeploy on every push to main
+
+# Persistent disk — REQUIRED for SQLite. The deploy will fail to keep
+# data across restarts without it (and crashes on a cold start if the
+# parent dir doesn't exist). 1 GB is plenty for the demo;
+# the demo writes < 5 MB even after heavy seeding.
+diskConfigs:
+  - name: walletsync-data
+    mountPath: /var/data
+    sizeGB: 1

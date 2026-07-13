@@ -225,33 +225,47 @@ all four passing.
 
 ## Deployment
 
-The frontend is a standard Next.js 16 application. Any platform that
-runs `next start` works — Vercel, Netlify, Render, Fly, a plain VM.
+WalletSync is a standard Next.js 16 application — but it ships
+**SQLite in the container**, which rules out serverless hosts with
+read-only filesystems.
 
-| Setting | Value |
-| --- | --- |
-| Build command | `npm run build` |
-| Start command | `npm run start` (binds to `$PORT`, defaults to `3001`) |
-| Node version | 20+ |
-| Persistent volume | Mount `data/` (or set `WALLETSYNC_DB_PATH`) |
-| Environment variables | None required for default SQLite mode |
+| Host       | SQLite persistent? | Recommended |
+| ---------- | ------------------ | ----------- |
+| Render     | ✅ (Disk)          | **yes**     |
+| Fly.io     | ✅ (volume)        | yes         |
+| Vercel     | ❌ read-only FS    | preview only — writes won't survive the next request |
 
-### Mounting the SQLite volume
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/bikash-20/-multi-provider-mobile-money-balance-viewer-bKash-Nagad-Rocket-)
 
-Because the DB is a local file, the **deploy target must persist
-`data/`** between deploys. The recommended pattern:
+### Quick start (Render)
 
-```text
-# Render disk example
-disk:
-  name: walletsync-data
-  mountPath: /var/data
-envVars:
-  - key: WALLETSYNC_DB_PATH
-    value: /var/data/walletsync.db
+1. Click the button above (or fork + Render Dashboard → New + → Blueprint).
+2. Wait ~3 min for the first build.
+3. Open your service URL.
+4. (Optional) Seed demo data: `WALLETSYNC_URL=https://walletsync.onrender.com npm --prefix frontend run db:seed`.
+
+The full operator guide — env vars, persistent-disk setup, Vercel
+caveats, troubleshooting — lives in
+[`docs/09_DEPLOYMENT.md`](docs/09_DEPLOYMENT.md).
+
+### Health probe
+
+Every deploy exposes `GET /api/health`. It returns:
+
+- **200 + `status:"ok"`** — process up, DB open, writes work. All green.
+- **200 + `status:"degraded"`** — DB open but writes fail. Likely a
+  missing persistent disk; see `docs/09_DEPLOYMENT.md#troubleshooting`.
+- **503 + `status:"down"`** — process up but DB unreachable. Check
+  `WALLETSYNC_DB_PATH`.
+
+### Smoke-checking a deploy
+
+```bash
+WALLETSYNC_URL=https://walletsync.onrender.com npm --prefix frontend run smoke
 ```
 
-If you skip this step, every cold start of the service wipes the DB.
+Exits non-zero on any failure. Wire it into a post-deploy hook to
+gate every release on its own liveness.
 
 ## Security and privacy
 
