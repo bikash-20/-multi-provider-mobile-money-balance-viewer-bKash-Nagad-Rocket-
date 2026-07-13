@@ -34,6 +34,7 @@ interface ProviderBalanceCardProps {
   balance?: number;
   lastUpdated?: string;
   onUpdate: (newBalance: number) => void;
+  onTransfer?: () => void;
   disabled?: boolean;
   pending?: boolean;
   /** Last `windowDays` of points for this provider. Optional — the
@@ -63,6 +64,7 @@ export function ProviderBalanceCard({
   balance,
   lastUpdated,
   onUpdate,
+  onTransfer,
   disabled = false,
   pending = false,
   series,
@@ -143,15 +145,28 @@ export function ProviderBalanceCard({
             )}
           </div>
           {!editing && (
-            <button
-              type="button"
-              onClick={startEdit}
-              disabled={disabled}
-              className="rounded-md border border-border bg-surface-2 px-2.5 py-1 text-xs font-semibold text-ink transition hover:border-signal hover:text-signal disabled:cursor-not-allowed disabled:opacity-50"
-              aria-label={`Update ${PROVIDER_LABEL[provider]} balance`}
-            >
-              Update balance
-            </button>
+            <div className="flex items-center gap-1.5">
+              {onTransfer && (
+                <button
+                  type="button"
+                  onClick={onTransfer}
+                  disabled={disabled}
+                  className="rounded-md border border-border bg-surface-2 px-2.5 py-1 text-xs font-semibold text-ink transition hover:border-signal hover:text-signal disabled:cursor-not-allowed disabled:opacity-50"
+                  aria-label={`Transfer from ${PROVIDER_LABEL[provider]}`}
+                >
+                  Transfer
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={startEdit}
+                disabled={disabled}
+                className="rounded-md border border-border bg-surface-2 px-2.5 py-1 text-xs font-semibold text-ink transition hover:border-signal hover:text-signal disabled:cursor-not-allowed disabled:opacity-50"
+                aria-label={`Update ${PROVIDER_LABEL[provider]} balance`}
+              >
+                Update balance
+              </button>
+            </div>
           )}
         </div>
 

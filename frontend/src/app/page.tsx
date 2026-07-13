@@ -26,6 +26,7 @@ import { AppShell } from "@/features/shell/AppShell";
 import { TotalBalanceHeader } from "@/features/wallet/TotalBalanceHeader";
 import { ProviderBalanceCard } from "@/features/wallet/ProviderBalanceCard";
 import { RecentEntries } from "@/features/wallet/RecentEntries";
+import { TransferDialog } from "@/features/wallet/TransferDialog";
 import { Skeleton } from "@/features/wallet/Skeleton";
 import { initialState, reducer } from "@/features/wallet/reducer";
 import {
@@ -63,6 +64,7 @@ export default function HomePage() {
   const [error, setError] = useState<string | null>(null);
   const [freshIds, setFreshIds] = useState<Set<string>>(new Set());
   const [meta, setMeta] = useState<MetaSnapshot | null>(null);
+  const [transferFrom, setTransferFrom] = useState<Provider | null>(null);
 
   // Initial fetch — server is the source of truth. Both /api/entries
   // and /api/meta fire in parallel; whichever resolves first paints
@@ -193,27 +195,35 @@ export default function HomePage() {
 
   // After a persona switch, refetch entries (the server just wiped +
   // reseeded) and update the meta snapshot.
-  const handlePersonaSwitched = useCallback((snapshot: MetaSnapshot) => {
-    setMeta(snapshot);
-    setLoading(true);
-    (async () => {
-      try {
-        const res = await fetch("/api/entries", { cache: "no-store" });
-        if (!res.ok) throw new Error(`GET /api/entries returned ${res.status}`);
-        const entries = (await res.json()) as BalanceEntry[];
-        dispatch({ type: "set_entries", entries });
-        setError(null);
-      } catch (err) {
-        setError(
-          err instanceof Error
-            ? `Couldn't load new entries: ${err.message}`
-            : "Couldn't load new entries.",
-        );
-      } finally {
-        setLoading(false);
-      }
-    })();
+  const refetchEntries = useCallback(async () => {
+    try {
+      const res = await fetch("/api/entries", { cache: "no-store" });
+      if (!res.ok) throw new Error(`GET /api/entries returned ${res.status}`);
+      const entries = (await res.json()) as BalanceEntry[];
+      dispatch({ type: "set_entries", entries });
+      setError(null);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? `Couldn't load new entries: ${err.message}`
+          : "Couldn't load new entries.",
+      );
+    }
   }, []);
+
+  const handlePersonaSwitched = useCallback(
+    (snapshot: MetaSnapshot) => {
+      setMeta(snapshot);
+      setLoading(true);
+      void refetchEntries().finally(() => setLoading(false));
+    },
+    [refetchEntries],
+  );
+
+  const handleTransferCommitted = useCallback(() => {
+    setTransferFrom(null);
+    void refetchEntries();
+  }, [refetchEntries]);
 
   return (
     <AppShell meta={meta} onPersonaSwitched={handlePersonaSwitched}>
@@ -253,6 +263,7 @@ export default function HomePage() {
                     disabled={false}
                     pending={Boolean(pending[p])}
                     onUpdate={(newBalance) => handleUpdate(p, newBalance)}
+                    onTransfer={() => setTransferFrom(p)}
                     series={seriesByProvider[p]}
                   />
                 );
@@ -267,6 +278,19 @@ export default function HomePage() {
           </>
         )}
       </div>
+
+      {transferFrom && (
+        <TransferDialog
+          defaultFrom={transferFrom}
+          balances={{
+            bkash: latestFor(state, "bkash")?.balance,
+            nagad: latestFor(state, "nagad")?.balance,
+            rocket: latestFor(state, "rocket")?.balance,
+          }}
+          onCommitted={handleTransferCommitted}
+          onClose={() => setTransferFrom(null)}
+        />
+      )}
     </AppShell>
   );
 }

@@ -6,26 +6,32 @@
  * layer swappable: a future Postgres deployment needs only a parallel
  * set of adapters and a switch on which file this module re-exports.
  *
- * Phase 3 wiring scope (current):
- *   - EntriesRepo   → SqliteEntriesRepo   (v1 `balance_entries` shape)
+ * Phase 6 wiring scope (current):
+ *   - EntriesRepo   → SqliteEntriesRepo   (v1 `BalanceEntry` shape, writes v2)
  *   - MetaRepo      → SqliteMetaRepo      (v1 `meta` KV table)
+ *   - BalanceRepo   → SqliteBalanceRepo   (v2 `provider_balance` snapshot row)
+ *   - TransferRepo  → SqliteTransferRepo  (v2 `transfers` double-entry ledger)
  *
- * The Phase 2 ports (`BalanceRepo`, `TransferRepo`, `EventRepo`,
- * `AdvisoryRepo`) target the v2 schema in
- * `lib/infrastructure/migrations/001_init.sql`. They are not wired
- * here yet because the application, seeder, and tests still target v1.
- * Wiring those is Phase 4 (schema swap).
+ * The AdvisoryRepo / EventRepo ports (Phase 2) target the v2 schema as
+ * well; they remain unwired because no route calls them yet. Wiring
+ * them is a single-line addition when the route lands.
  */
 import type { Database as DB } from "better-sqlite3";
 
 import type { EntriesRepo } from "@/lib/domain/repositories/entriesRepo";
 import type { MetaRepo } from "@/lib/domain/repositories/metaRepo";
+import type { BalanceRepo } from "@/lib/domain/repositories/balanceRepo";
+import type { TransferRepo } from "@/lib/domain/repositories/transferRepo";
 import { SqliteEntriesRepo } from "@/lib/infrastructure/repos/sqliteEntriesRepo";
 import { SqliteMetaRepo } from "@/lib/infrastructure/repos/sqliteMetaRepo";
+import { SqliteBalanceRepo } from "@/lib/infrastructure/repos/sqliteBalanceRepo";
+import { SqliteTransferRepo } from "@/lib/infrastructure/repos/sqliteTransferRepo";
 
 export interface Repositories {
   readonly entries: EntriesRepo;
   readonly meta: MetaRepo;
+  readonly balances: BalanceRepo;
+  readonly transfers: TransferRepo;
 }
 
 /**
@@ -37,7 +43,9 @@ export function getRepositories(db: DB): Repositories {
   return {
     entries: new SqliteEntriesRepo(db),
     meta: new SqliteMetaRepo(db),
+    balances: new SqliteBalanceRepo(db),
+    transfers: new SqliteTransferRepo(db),
   };
 }
 
-export type { EntriesRepo, MetaRepo };
+export type { EntriesRepo, MetaRepo, BalanceRepo, TransferRepo };
