@@ -2,24 +2,29 @@
  * lib/db.ts — the single swap-point for persistence.
  *
  * Every other file in this repo talks to entries through the repository
- * in `lib/entriesRepo.ts`, which only sees the `Database` instance
- * returned here. Swapping SQLite for Postgres (or node:sqlite, or
+ * factories in `lib/infrastructure/repos/`, which only see the `Database`
+ * instance returned here. Swapping SQLite for Postgres (or node:sqlite, or
  * anything else) is therefore a change isolated to this file plus the
- * matching repo implementation — no API route, no React component, no
+ * matching repo implementations — no API route, no React component, no
  * reducer needs to know.
  *
  * Behaviour:
- *  - `getDb()` is a process-wide singleton. Next.js dev mode hot-reloads
+ *  - `getDb()` is a process-wide singleton. Next.js dev mode hot-reload
  *    modules, so we cache the connection on `globalThis` to avoid opening
  *    a new file handle on every request.
  *  - `resolveDbPath()` honours the `WALLETSYNC_DB_PATH` env override so
  *    the app can point at a writable volume in a deploy target without
  *    code changes.
- *  - Schema is created idempotently on first open via `initSchema()`.
+ *  - Schema is provisioned by the migration runner in
+ *    `lib/infrastructure/migrate.ts`, applied idempotently on first open.
+ *    Migrations live in `lib/infrastructure/migrations/*.sql` and are
+ *    recorded in the `_migrations` table so a rerun is a no-op.
  */
 import Database, { type Database as DB } from "better-sqlite3";
 import path from "node:path";
 import fs from "node:fs";
+
+import { migrate } from "@/lib/infrastructure/migrate";
 
 interface CachedDb {
   db: DB;
@@ -37,39 +42,23 @@ function resolveDbPath(): string {
   return path.resolve(process.cwd(), "..", "data", "walletsync.db");
 }
 
+function resolveMigrationsDir(): string {
+  // Migrations live in source — Next.js runs from the project root, so the
+  // path is stable. The same convention is used by `@/__tests__/migratedDb`.
+  return path.resolve(
+    process.cwd(),
+    "src",
+    "lib",
+    "infrastructure",
+    "migrations",
+  );
+}
+
 function ensureDir(filePath: string): void {
   const dir = path.dirname(filePath);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
-}
-
-function initSchema(db: DB): void {
-  db.pragma("journal_mode = WAL");
-  db.pragma("foreign_keys = ON");
-  // Append-only log. No UPDATE / DELETE paths anywhere in the app — this
-  // matches the original spec's "log is append-only" rule (WALLETSYNC_SPEC
-  // §4). The most recent row per provider is the current balance; older
-  // rows are kept for the Recent Entries view.
-  //
-  // `meta` is a small KV table used by the seed script to record demo
-  // persona metadata (label, generation timestamp, demo flag). Created
-  // here so the app's schema and the seeder's schema stay in lock-step.
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS balance_entries (
-      id          TEXT PRIMARY KEY,
-      provider    TEXT NOT NULL CHECK (provider IN ('bkash', 'nagad', 'rocket')),
-      balance     REAL NOT NULL CHECK (balance >= 0),
-      timestamp   TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_balance_entries_provider_ts
-      ON balance_entries (provider, timestamp DESC);
-
-    CREATE TABLE IF NOT EXISTS meta (
-      key   TEXT PRIMARY KEY,
-      value TEXT NOT NULL
-    );
-  `);
 }
 
 /** Returns the singleton Database. Opens on first call, returns the
@@ -81,7 +70,13 @@ export function getDb(): DB {
   const filePath = resolveDbPath();
   ensureDir(filePath);
   const db = new Database(filePath);
-  initSchema(db);
+  // Match the PRAGMAs that 001_init.sql sets when run against a fresh DB,
+  // so a v1-style DB opened *before* migrations have run still gets WAL +
+  // foreign_keys. migrate() will re-PRAGMA the same values; the duplicate
+  // is harmless.
+  db.pragma("journal_mode = WAL");
+  db.pragma("foreign_keys = ON");
+  migrate(db, resolveMigrationsDir());
   g[GLOBAL_KEY] = { db };
   return db;
 }

@@ -1,13 +1,27 @@
 /**
  * db.test.ts — verifies the persistence singleton:
- *  - schema creation is idempotent
+ *  - schema is provisioned by the migration runner (idempotent)
  *  - WAL mode actually sticks (not silently regressed to journal)
- *  - CHECK constraints reject bad providers + negative balances
+ *  - CHECK constraints reject out-of-allowlist providers + negative
+ *    balances on the v2 schema
  */
 import { describe, it, expect, beforeEach } from "vitest";
 
 import { closeDb, getDb } from "@/lib/db";
 import { withTempDb } from "@/__tests__/withTempDb";
+
+const PERSONA = "freelancer";
+
+/** Seed the minimum v2 rows so `balance_entries` can accept an
+ *  insert (the FK requires a parent row in `personas`). */
+function seedPersona(db: ReturnType<typeof getDb>) {
+  db.prepare(
+    `INSERT INTO personas
+       (id, display_name, opening_bkash, opening_nagad, opening_rocket,
+        inflow_rate, volatility)
+     VALUES (?, ?, 8500, 4200, 24000, 1.0, 0.10)`,
+  ).run(PERSONA, "Freelancer");
+}
 
 describe("lib/db", () => {
   beforeEach(() => {
@@ -24,36 +38,47 @@ describe("lib/db", () => {
     });
   });
 
-  it("creates the balance_entries schema and is idempotent on re-open", async () => {
+  it("provisions the v2 schema and is idempotent on re-open", async () => {
     await withTempDb(() => {
       const first = getDb();
+      seedPersona(first);
       first
         .prepare(
-          "INSERT INTO balance_entries (id, provider, balance, timestamp) VALUES (?, ?, ?, ?)",
+          `INSERT INTO balance_entries
+             (persona_id, provider_id, balance, source, transfer_id, ts)
+           VALUES (?, 'bkash', 100, 'manual', NULL, ?)`,
         )
-        .run("seed-1", "bkash", 100, "2025-01-01T00:00:00.000Z");
+        .run(PERSONA, Date.parse("2025-01-01T00:00:00Z"));
 
-      // Force a clean re-open by closing the singleton. The file on disk
-      // must already have the schema; open() should not throw or
-      // re-create it (CREATE TABLE IF NOT EXISTS).
+      // Force a clean re-open. The file on disk must already have the
+      // schema; the migration runner must not throw or duplicate.
       closeDb();
       const second = getDb();
       const row = second
-        .prepare("SELECT id FROM balance_entries WHERE id = ?")
-        .get("seed-1") as { id: string } | undefined;
-      expect(row?.id).toBe("seed-1");
+        .prepare(
+          `SELECT id, persona_id, provider_id FROM balance_entries
+             WHERE persona_id = ?`,
+        )
+        .get(PERSONA) as
+        | { id: number; persona_id: string; provider_id: string }
+        | undefined;
+      expect(row?.persona_id).toBe(PERSONA);
+      expect(row?.provider_id).toBe("bkash");
     });
   });
 
   it("rejects an INSERT whose provider is outside the allowlist", async () => {
     await withTempDb(() => {
       const db = getDb();
+      seedPersona(db);
       expect(() =>
         db
           .prepare(
-            "INSERT INTO balance_entries (id, provider, balance, timestamp) VALUES (?, ?, ?, ?)",
+            `INSERT INTO balance_entries
+               (persona_id, provider_id, balance, source, transfer_id, ts)
+             VALUES (?, 'paypal', 50, 'manual', NULL, ?)`,
           )
-          .run("bad-1", "paypal", 50, "2025-01-01T00:00:00.000Z"),
+          .run(PERSONA, Date.parse("2025-01-01T00:00:00Z")),
       ).toThrow(/CHECK constraint/i);
     });
   });
@@ -61,12 +86,15 @@ describe("lib/db", () => {
   it("rejects an INSERT whose balance is negative", async () => {
     await withTempDb(() => {
       const db = getDb();
+      seedPersona(db);
       expect(() =>
         db
           .prepare(
-            "INSERT INTO balance_entries (id, provider, balance, timestamp) VALUES (?, ?, ?, ?)",
+            `INSERT INTO balance_entries
+               (persona_id, provider_id, balance, source, transfer_id, ts)
+             VALUES (?, 'rocket', -1, 'manual', NULL, ?)`,
           )
-          .run("bad-2", "rocket", -1, "2025-01-01T00:00:00.000Z"),
+          .run(PERSONA, Date.parse("2025-01-01T00:00:00Z")),
       ).toThrow(/CHECK constraint/i);
     });
   });

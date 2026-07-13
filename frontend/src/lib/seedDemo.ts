@@ -11,20 +11,35 @@
  *   - scripts/seed-demo-data.mjs (CLI)
  *   - POST /api/persona/switch (in-app dropdown)
  *
- * Both call into the same `seedDemo(persona, days)` so the shape and
+ * Both call into the same `seedDemo(persona, days, db)` so the shape and
  * values are identical regardless of which path produced the data.
  *
  * Personas: freelancer | small_business | student
  *   See PERSONAS below for the per-persona baseline, volatility,
  *   drift, and spike cadence.
+ *
+ * Phase 4: writes to the v2 schema (personas + provider_balance +
+ * per-persona balance_entries + meta). The caller hands us an open
+ * `Database` so the migration runner in `lib/infrastructure/migrate.ts`
+ * has already provisioned the schema; we only write rows.
  */
 
-import Database from "better-sqlite3";
-import { randomUUID } from "node:crypto";
 import path from "node:path";
 import fs from "node:fs";
+import Database from "better-sqlite3";
 
+import { migrate } from "@/lib/infrastructure/migrate";
 import { PROVIDERS, type Provider } from "@/features/wallet/types";
+
+type DB = InstanceType<typeof Database>;
+
+const MIGRATIONS_DIR = path.resolve(
+  process.cwd(),
+  "src",
+  "lib",
+  "infrastructure",
+  "migrations",
+);
 
 /* ─── public types ─────────────────────────────────────────────────── */
 
@@ -150,10 +165,9 @@ function pick<T>(rand: () => number, arr: readonly T[]): T {
 /* ─── generation ───────────────────────────────────────────────────── */
 
 interface SeededEntry {
-  id: string;
   provider: Provider;
   balance: number;
-  timestamp: string;
+  timestamp: number;
 }
 
 function generateEntries(
@@ -215,15 +229,13 @@ function generateEntries(
       );
       const ts = new Date(dayDate);
       ts.setHours(hour, Math.floor(rand() * 60), 0, 0);
-      const isoTs =
-        ts.getTime() > now ? new Date(now).toISOString() : ts.toISOString();
+      const epochMs = Math.min(ts.getTime(), now);
 
       for (const provider of PROVIDERS) {
         out.push({
-          id: randomUUID(),
           provider,
           balance: Math.round(balance[provider] * 100) / 100,
-          timestamp: isoTs,
+          timestamp: epochMs,
         });
       }
     }
@@ -234,38 +246,23 @@ function generateEntries(
 
 /* ─── schema + persistence ─────────────────────────────────────────── */
 
-function ensureDir(p: string): void {
-  const d = path.dirname(p);
-  if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
-}
-
-function openDb(dbPath: string): Database.Database {
-  ensureDir(dbPath);
+/** Open a writable `Database` for the seeder. Caller-owned lifecycle
+ *  (we open + close so the CLI doesn't leak file handles). */
+function openDb(dbPath: string): DB {
+  const dir = path.dirname(dbPath);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   const db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS balance_entries (
-      id        TEXT PRIMARY KEY,
-      provider  TEXT NOT NULL CHECK (provider IN ('bkash','nagad','rocket')),
-      balance   REAL NOT NULL CHECK (balance >= 0),
-      timestamp TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_balance_entries_provider_ts
-      ON balance_entries (provider, timestamp DESC);
-
-    CREATE TABLE IF NOT EXISTS meta (
-      key   TEXT PRIMARY KEY,
-      value TEXT NOT NULL
-    );
-  `);
   return db;
 }
 
 /**
- * Run the seed against the database at `dbPath`. Wipes existing entries
- * + meta rows, then inserts the freshly-generated series + persona
- * metadata, all inside a single transaction.
+ * Run the seed against the database at `dbPath`. Wipes any prior
+ * balance_entries for the target persona, then writes the freshly
+ * generated series + persona metadata + provider_balance rows, all
+ * inside a single transaction. The schema itself is provisioned
+ * idempotently by the migration runner.
  */
 export function seedDemo(
   personaName: PersonaName,
@@ -287,28 +284,88 @@ export function seedDemo(
   const db = openDb(dbPath);
   const generatedAt = new Date(now).toISOString();
   try {
-    const wipeEntries = db.prepare("DELETE FROM balance_entries");
-    const wipeMeta = db.prepare("DELETE FROM meta");
-    const insert = db.prepare(
-      "INSERT INTO balance_entries (id, provider, balance, timestamp) VALUES (?, ?, ?, ?)",
+    // Provision schema (no-op on a previously-migrated DB).
+    migrate(db, MIGRATIONS_DIR);
+
+    // Prepare statements once; reuse inside the transaction.
+    const upsertPersona = db.prepare(
+      `INSERT INTO personas
+         (id, display_name, opening_bkash, opening_nagad, opening_rocket,
+          inflow_rate, volatility)
+       VALUES (?, ?, ?, ?, ?, 1.0, 0.10)
+       ON CONFLICT(id) DO UPDATE SET
+         display_name   = excluded.display_name,
+         opening_bkash  = excluded.opening_bkash,
+         opening_nagad  = excluded.opening_nagad,
+         opening_rocket = excluded.opening_rocket`,
     );
-    const insertMeta = db.prepare(
-      "INSERT INTO meta (key, value) VALUES (?, ?)",
+    const wipeEntries = db.prepare(
+      "DELETE FROM balance_entries WHERE persona_id = ?",
+    );
+    const upsertBalance = db.prepare(
+      `INSERT INTO provider_balance
+         (persona_id, provider_id, balance, version_id, updated_at)
+       VALUES (?, ?, ?, 1, ?)
+       ON CONFLICT(persona_id, provider_id) DO UPDATE SET
+         balance    = excluded.balance,
+         version_id = provider_balance.version_id + 1,
+         updated_at = excluded.updated_at`,
+    );
+    const insertEntry = db.prepare(
+      `INSERT INTO balance_entries
+         (persona_id, provider_id, balance, source, transfer_id, ts)
+       VALUES (?, ?, ?, 'seed', NULL, ?)`,
+    );
+    const upsertMeta = db.prepare(
+      "INSERT INTO meta (key, value) VALUES (?, ?) " +
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
     );
 
-    const tx = db.transaction((rows: SeededEntry[]) => {
-      wipeEntries.run();
-      wipeMeta.run();
-      for (const r of rows) {
-        insert.run(r.id, r.provider, r.balance, r.timestamp);
+    const tx = db.transaction(() => {
+      // 1. Persona row (id matches the persona name).
+      upsertPersona.run(
+        config.name,
+        config.label,
+        config.baseline.bkash,
+        config.baseline.nagad,
+        config.baseline.rocket,
+      );
+
+      // 2. Wipe any prior entries for this persona only.
+      wipeEntries.run(config.name);
+
+      // 3. Current balances: the most-recent entry's balance, or the
+      //    baseline if none.
+      const lastByProvider: Record<Provider, number> = { ...config.baseline };
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const e = entries[i]!;
+        // entries are grouped by day then provider, newest-first; the
+        // last one we see for each provider is the newest.
+        if (lastByProvider[e.provider] === config.baseline[e.provider]) {
+          lastByProvider[e.provider] = e.balance;
+        }
       }
-      insertMeta.run("seed.persona", config.name);
-      insertMeta.run("seed.label", config.label);
-      insertMeta.run("seed.description", config.description);
-      insertMeta.run("seed.generated_at", generatedAt);
-      insertMeta.run("seed.demo", "true");
+      // 4. Reset provider_balance to the current snapshot.
+      const t = Date.now();
+      for (const p of PROVIDERS) {
+        upsertBalance.run(config.name, p, lastByProvider[p], t);
+      }
+
+      // 5. Insert the history rows.
+      for (const e of entries) {
+        insertEntry.run(config.name, e.provider, e.balance, e.timestamp);
+      }
+
+      // 6. Demo metadata + active_persona marker so the entries repo
+      //    scopes its queries to this persona.
+      upsertMeta.run("seed.persona", config.name);
+      upsertMeta.run("seed.label", config.label);
+      upsertMeta.run("seed.description", config.description);
+      upsertMeta.run("seed.generated_at", generatedAt);
+      upsertMeta.run("seed.demo", "true");
+      upsertMeta.run("active_persona", config.name);
     });
-    tx(entries);
+    tx();
   } finally {
     db.close();
   }
@@ -321,7 +378,7 @@ export function seedDemo(
   const daySet = new Set<string>();
   for (const e of entries) {
     perProvider[e.provider]++;
-    daySet.add(e.timestamp.slice(0, 10));
+    daySet.add(new Date(e.timestamp).toISOString().slice(0, 10));
   }
 
   return {

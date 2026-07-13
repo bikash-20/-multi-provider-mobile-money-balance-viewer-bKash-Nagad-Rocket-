@@ -60,9 +60,8 @@ describe("/api/entries", () => {
         };
         expect(body.provider).toBe("rocket");
         expect(body.balance).toBe(1234.56);
-        expect(body.id).toMatch(
-          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
-        );
+        // Server-generated id is a numeric string of lastInsertRowid.
+        expect(body.id).toMatch(/^\d+$/);
         expect(typeof body.timestamp).toBe("string");
         // ISO 8601 — parseable back into a Date.
         expect(Number.isNaN(Date.parse(body.timestamp))).toBe(false);
