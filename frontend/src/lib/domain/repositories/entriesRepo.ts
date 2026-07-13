@@ -15,9 +15,41 @@
  */
 import type { BalanceEntry, Provider } from "@/features/wallet/types";
 
+/**
+ * Keyset cursor for paging back through the entries log. `id` is the
+ * stringified autoincrement primary key of the row at the bottom of
+ * the current page (the OLDEST row on the page, since we list
+ * newest-first); clients feed both back as `beforeTs` + `beforeId`
+ * to fetch the next page. The composite cursor is stable across
+ * same-ms ties because `id` is monotonically increasing.
+ */
+export interface EntriesCursor {
+  ts: number;
+  id: string;
+}
+
 export interface EntriesRepo {
-  /** All entries, newest-first. Empty array when no rows persist. */
+  /**
+   * All entries, newest-first. Thin wrapper over `listPage({limit})`
+   * — preserved for callers that want the full history (e.g. the
+   * sparkline series builder). Pagination-aware callers should use
+   * `listPage` instead.
+   */
   listEntries(): Promise<BalanceEntry[]>;
+
+  /**
+   * Page through the entries log newest-first using a composite
+   * `(ts, id)` keyset cursor. When `before` is omitted, the first
+   * page is returned; otherwise only rows strictly older than the
+   * cursor row are returned. The page size is bounded by `limit`.
+   *
+   * Phase 10: mirrors Phase 9's transferRepo.recentPage so the two
+   * streams on the dashboard can paginate in lockstep.
+   */
+  listPage(opts: {
+    limit: number;
+    before?: EntriesCursor;
+  }): Promise<BalanceEntry[]>;
 
   /**
    * Append a single row. Server assigns `id` (UUIDv4) and `timestamp`

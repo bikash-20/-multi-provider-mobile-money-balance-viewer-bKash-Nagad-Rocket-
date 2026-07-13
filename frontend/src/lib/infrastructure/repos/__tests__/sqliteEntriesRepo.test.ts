@@ -244,4 +244,117 @@ describe("SqliteEntriesRepo", () => {
       expect(finalRow.balance).toBe(250);
     });
   });
+
+  // Phase 10: keyset pagination via (ts, id) composite cursor. The
+  // port exposes listPage(opts); these tests pin the contract that
+  // the route layer relies on (cursor strictly older, no duplicates,
+  // empty tail returns []).
+  describe("listPage", () => {
+    it("returns [] when the persona has no rows", async () => {
+      await withTempDb(async () => {
+        const db = getDb();
+        seedPersona(db);
+        const repo = new SqliteEntriesRepo(db);
+        expect(await repo.listPage({ limit: 50 })).toEqual([]);
+      });
+    });
+
+    it("returns the newest N rows when called without a cursor", async () => {
+      await withTempDb(async () => {
+        const db = getDb();
+        seedPersona(db);
+        // Seed three strictly-increasing timestamps.
+        insertRow(
+          db,
+          PERSONA,
+          "bkash",
+          100,
+          Date.parse("2025-01-01T00:00:00Z"),
+        );
+        insertRow(
+          db,
+          PERSONA,
+          "nagad",
+          200,
+          Date.parse("2025-01-02T00:00:00Z"),
+        );
+        insertRow(
+          db,
+          PERSONA,
+          "rocket",
+          300,
+          Date.parse("2025-01-03T00:00:00Z"),
+        );
+        const repo = new SqliteEntriesRepo(db);
+        const page = await repo.listPage({ limit: 2 });
+        expect(page.map((e) => e.provider)).toEqual(["rocket", "nagad"]);
+      });
+    });
+
+    it("respects the (ts, id) cursor and excludes the cursor row itself", async () => {
+      await withTempDb(async () => {
+        const db = getDb();
+        seedPersona(db);
+        // Insert in chronological order so the autoincrement id
+        // order matches ts order — keeps the assertions simple.
+        const ts1 = Date.parse("2025-01-01T00:00:00Z");
+        const ts2 = Date.parse("2025-01-02T00:00:00Z");
+        const ts3 = Date.parse("2025-01-03T00:00:00Z");
+        const id1 = insertRow(db, PERSONA, "bkash", 100, ts1);
+        const id2 = insertRow(db, PERSONA, "nagad", 200, ts2);
+        insertRow(db, PERSONA, "rocket", 300, ts3);
+
+        const repo = new SqliteEntriesRepo(db);
+        // Cursor = (ts2, id2) ⇒ next page should be [id1].
+        const page = await repo.listPage({
+          limit: 10,
+          before: { ts: ts2, id: String(id2) },
+        });
+        expect(page.map((e) => Number(e.id))).toEqual([id1]);
+      });
+    });
+
+    it("breaks ties on same-ms inserts by descending id", async () => {
+      await withTempDb(async () => {
+        const db = getDb();
+        seedPersona(db);
+        // All three rows share a ts so the only thing that breaks
+        // the tie is the autoincrement id. We seed in the order
+        // we want to appear (newest first ⇒ highest id first).
+        const ts = Date.parse("2025-01-01T00:00:00Z");
+        const id1 = insertRow(db, PERSONA, "bkash", 10, ts);
+        const id2 = insertRow(db, PERSONA, "bkash", 11, ts);
+        const id3 = insertRow(db, PERSONA, "bkash", 12, ts);
+
+        const repo = new SqliteEntriesRepo(db);
+        // Cursor at id2 ⇒ only id1 should come back.
+        const page = await repo.listPage({
+          limit: 10,
+          before: { ts, id: String(id2) },
+        });
+        expect(page.map((e) => Number(e.id))).toEqual([id1]);
+        // Sanity: no cursor ⇒ full DESC list, newest id first.
+        const all = await repo.listPage({ limit: 10 });
+        expect(all.map((e) => Number(e.id))).toEqual([id3, id2, id1]);
+      });
+    });
+
+    it("returns [] when the cursor is older than any row (end-of-history)", async () => {
+      await withTempDb(async () => {
+        const db = getDb();
+        seedPersona(db);
+        const oldTs = Date.parse("2024-01-01T00:00:00Z");
+        const oldId = insertRow(db, PERSONA, "bkash", 50, oldTs);
+
+        const repo = new SqliteEntriesRepo(db);
+        // Cursor = (oldTs, oldId) ⇒ no rows are strictly older, so
+        // the page is empty.
+        const page = await repo.listPage({
+          limit: 10,
+          before: { ts: oldTs, id: String(oldId) },
+        });
+        expect(page).toEqual([]);
+      });
+    });
+  });
 });

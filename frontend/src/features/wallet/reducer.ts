@@ -23,7 +23,11 @@ export type Action =
       timestamp: string;
       id: string;
     }
-  | { type: "remove_entry"; id: string };
+  | { type: "remove_entry"; id: string }
+  /** Phase 10: append the next keyset page of older entries to the
+   *  tail of the log. Dedupe on `id` so a same-ms row that lands
+   *  between two requests can't double-render. */
+  | { type: "append_entries"; entries: BalanceEntry[] };
 
 /** Empty initial state — the server provides the entries on first GET.
  *  Anything else here would be lying on the first render. */
@@ -53,6 +57,18 @@ export function reducer(state: AppState, action: Action): AppState {
       return {
         entries: state.entries.filter((e) => e.id !== action.id),
       };
+    }
+    case "append_entries": {
+      // Server returns rows in ts DESC order. We're appending to the
+      // tail, which is also the oldest end of the list, so we just
+      // concat — but only rows we haven't seen yet. The page's
+      // dispatch site also guards, but the reducer's own dedupe
+      // makes this safe to call from anywhere (tests, retries, …).
+      if (action.entries.length === 0) return state;
+      const seen = new Set(state.entries.map((e) => e.id));
+      const additions = action.entries.filter((e) => !seen.has(e.id));
+      if (additions.length === 0) return state;
+      return { entries: [...state.entries, ...additions] };
     }
   }
 }

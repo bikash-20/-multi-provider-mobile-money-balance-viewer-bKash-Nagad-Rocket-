@@ -21,7 +21,10 @@
 import type { Database as DB } from "better-sqlite3";
 import { withTransaction } from "@/lib/infrastructure/transaction";
 import { runWithRetry, type RetryPolicy } from "@/lib/infrastructure/retry";
-import type { EntriesRepo } from "@/lib/domain/repositories/entriesRepo";
+import type {
+  EntriesRepo,
+  EntriesCursor,
+} from "@/lib/domain/repositories/entriesRepo";
 import type {
   BalanceEntry,
   Provider,
@@ -132,16 +135,44 @@ export class SqliteEntriesRepo implements EntriesRepo {
   constructor(private readonly db: DB) {}
 
   listEntries(): Promise<BalanceEntry[]> {
+    // Thin wrapper over listPage for callers that want the whole
+    // history (e.g. the sparkline series builder). Pagination-aware
+    // callers should use listPage directly.
+    return this.listPage({ limit: Number.MAX_SAFE_INTEGER });
+  }
+
+  listPage(opts: {
+    limit: number;
+    before?: EntriesCursor;
+  }): Promise<BalanceEntry[]> {
     const personaId = readActivePersona(this.db);
     if (!personaId) return Promise.resolve([]);
-    const rows = this.db
-      .prepare<[string], V2Row>(
-        `SELECT id, persona_id, provider_id, balance, source, transfer_id, ts
-         FROM balance_entries
-         WHERE persona_id = ?
-         ORDER BY ts DESC, id DESC`,
-      )
-      .all(personaId);
+    const { limit, before } = opts;
+    const rows = before
+      ? this.db
+          .prepare<[string, number, number, number], V2Row>(
+            `SELECT id, persona_id, provider_id, balance, source, transfer_id, ts
+             FROM balance_entries
+             WHERE persona_id = ?
+               AND (ts, id) < (?, ?)
+             ORDER BY ts DESC, id DESC
+             LIMIT ?`,
+          )
+          .all(
+            personaId,
+            before.ts,
+            Number(before.id),
+            limit,
+          )
+      : this.db
+          .prepare<[string, number], V2Row>(
+            `SELECT id, persona_id, provider_id, balance, source, transfer_id, ts
+             FROM balance_entries
+             WHERE persona_id = ?
+             ORDER BY ts DESC, id DESC
+             LIMIT ?`,
+          )
+          .all(personaId, limit);
     return Promise.resolve(rows.map(hydrate));
   }
 

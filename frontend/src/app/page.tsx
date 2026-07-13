@@ -78,6 +78,14 @@ export default function HomePage() {
     id: string;
   } | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  // Phase 10: same keyset pattern for the entries log. The two
+  // cursors advance independently — appending from `loadOlderEntries`
+  // doesn't disturb the transfer cursor, and vice versa.
+  const [entriesCursor, setEntriesCursor] = useState<{
+    ts: number;
+    id: string;
+  } | null>(null);
+  const [loadingEntriesOlder, setLoadingEntriesOlder] = useState(false);
   // Ids currently mid-POST against /api/transfers/[id]/reverse. The
   // RecentEntries row uses this to disable its button + show a spinner.
   const [reversingIds, setReversingIds] = useState<ReadonlySet<string>>(
@@ -102,7 +110,11 @@ export default function HomePage() {
         if (!entriesRes.ok) {
           throw new Error(`GET /api/entries returned ${entriesRes.status}`);
         }
-        const entries = (await entriesRes.json()) as BalanceEntry[];
+        const entriesPayload = (await entriesRes.json()) as {
+          entries: BalanceEntry[];
+          nextCursor: { ts: number; id: string } | null;
+        };
+        const entries = entriesPayload.entries ?? [];
         const snapshot: MetaSnapshot | null = metaRes.ok
           ? ((await metaRes.json()) as MetaSnapshot)
           : null;
@@ -120,6 +132,7 @@ export default function HomePage() {
           setMeta(snapshot);
           setTransfers(transfersPayload.transfers);
           setTransferCursor(transfersPayload.nextCursor);
+          setEntriesCursor(entriesPayload.nextCursor);
           setLoading(false);
         }
       } catch (err) {
@@ -232,8 +245,12 @@ export default function HomePage() {
     try {
       const res = await fetch("/api/entries", { cache: "no-store" });
       if (!res.ok) throw new Error(`GET /api/entries returned ${res.status}`);
-      const entries = (await res.json()) as BalanceEntry[];
-      dispatch({ type: "set_entries", entries });
+      const payload = (await res.json()) as {
+        entries: BalanceEntry[];
+        nextCursor: { ts: number; id: string } | null;
+      };
+      dispatch({ type: "set_entries", entries: payload.entries ?? [] });
+      setEntriesCursor(payload.nextCursor ?? null);
       setError(null);
     } catch (err) {
       setError(
@@ -243,6 +260,46 @@ export default function HomePage() {
       );
     }
   }, []);
+
+  // Phase 10: append the next page of entries. Mirrors
+  // loadOlderTransfers but operates on the balance_entries log;
+  // the cursor uses (ts, autoincrement id) instead of (ts, UUIDv7).
+  // We dedupe on entry id (a stringified autoincrement) so a
+  // same-ms row appended mid-paging doesn't double-render.
+  const loadOlderEntries = useCallback(async () => {
+    if (entriesCursor === null || loadingEntriesOlder) return;
+    setLoadingEntriesOlder(true);
+    try {
+      const params = new URLSearchParams({
+        beforeTs: String(entriesCursor.ts),
+        beforeId: entriesCursor.id,
+      });
+      const res = await fetch(`/api/entries?${params.toString()}`, {
+        cache: "no-store",
+      });
+      if (!res.ok) {
+        throw new Error(`GET /api/entries returned ${res.status}`);
+      }
+      const payload = (await res.json()) as {
+        entries: BalanceEntry[];
+        nextCursor: { ts: number; id: string } | null;
+      };
+      const appended = payload.entries ?? [];
+      dispatch({
+        type: "append_entries",
+        entries: appended,
+      });
+      setEntriesCursor(payload.nextCursor ?? null);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? `Couldn't load older entries: ${err.message}`
+          : "Couldn't load older entries.",
+      );
+    } finally {
+      setLoadingEntriesOlder(false);
+    }
+  }, [entriesCursor, loadingEntriesOlder]);
 
   // Phase 9: page-1 fetcher. Used by `refetchAll` after a commit /
   // reverse / persona-switch so the list always starts from the head
@@ -447,9 +504,17 @@ export default function HomePage() {
               onReverse={handleReverseTransfer}
               alreadyReversedIds={alreadyReversedIds}
               reversingIds={reversingIds}
-              hasMore={transferCursor !== null}
-              loadingOlder={loadingOlder}
-              onLoadOlder={loadOlderTransfers}
+              hasMore={transferCursor !== null || entriesCursor !== null}
+              loadingOlder={loadingOlder || loadingEntriesOlder}
+              onLoadOlder={() => {
+                // Phase 10: fire both paginations in parallel so the
+                // user reaches the true tail of history in one click,
+                // regardless of which stream still has rows. Each
+                // handler is its own guard; calling one with a null
+                // cursor is a no-op so we don't have to branch here.
+                void loadOlderTransfers();
+                void loadOlderEntries();
+              }}
             />
           </>
         )}
