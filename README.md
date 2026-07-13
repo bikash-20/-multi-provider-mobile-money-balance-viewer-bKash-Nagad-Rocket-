@@ -40,6 +40,7 @@ npm run lint          # eslint .
 npm run test          # vitest run
 npm run db:reset      # wipe local SQLite db
 npm run db:seed       # insert demo entries
+npm run smoke         # liveness probe against $WALLETSYNC_URL (default http://localhost:3001)
 ```
 
 ### Point at a writable volume

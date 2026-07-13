@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "db:reset": "node ./scripts/db-reset.mjs",
     "db:seed": "node ./scripts/seed-demo-data.mjs",
+    "smoke": "node ./scripts/smoke.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },
