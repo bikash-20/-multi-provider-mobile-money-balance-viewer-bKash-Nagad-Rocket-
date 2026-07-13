@@ -533,5 +533,181 @@ describe("POST /api/transfers", () => {
         ]);
       });
     });
+
+    // ─── Phase 9: keyset pagination on the GET surface ───────────
+
+    it("first page: emits nextCursor when the page is full, null otherwise", async () => {
+      await withTempDb(async () => {
+        seedPersona(DEFAULT_BALANCES);
+
+        // 2 of 3 — under limit: no cursor.
+        const a = await POST(
+          makeJsonRequest({ from: "bkash", to: "nagad", amountBdt: 1 }),
+        );
+        expect(a.status).toBe(201);
+        await new Promise((r) => setTimeout(r, 3));
+        const b = await POST(
+          makeJsonRequest({ from: "bkash", to: "rocket", amountBdt: 1 }),
+        );
+        expect(b.status).toBe(201);
+
+        const short = await GET(makeGetRequest({ limit: "5" }));
+        const shortBody = (await short.json()) as {
+          transfers: unknown[];
+          nextCursor: { ts: number; id: string } | null;
+        };
+        expect(shortBody.transfers).toHaveLength(2);
+        expect(shortBody.nextCursor).toBeNull();
+
+        // Fill to limit: cursor is non-null.
+        await new Promise((r) => setTimeout(r, 3));
+        const c = await POST(
+          makeJsonRequest({ from: "bkash", to: "nagad", amountBdt: 1 }),
+        );
+        expect(c.status).toBe(201);
+        await new Promise((r) => setTimeout(r, 3));
+        const d = await POST(
+          makeJsonRequest({ from: "bkash", to: "rocket", amountBdt: 1 }),
+        );
+        expect(d.status).toBe(201);
+        await new Promise((r) => setTimeout(r, 3));
+        const e = await POST(
+          makeJsonRequest({ from: "bkash", to: "nagad", amountBdt: 1 }),
+        );
+        expect(e.status).toBe(201);
+
+        const full = await GET(makeGetRequest({ limit: "5" }));
+        const fullBody = (await full.json()) as {
+          transfers: Array<{ transferId: string; ts: number }>;
+          nextCursor: { ts: number; id: string } | null;
+        };
+        expect(fullBody.transfers).toHaveLength(5);
+        expect(fullBody.nextCursor).not.toBeNull();
+        // Cursor's row == the oldest on this page (last in DESC order).
+        const oldest = fullBody.transfers[fullBody.transfers.length - 1]!;
+        expect(fullBody.nextCursor!.ts).toBe(oldest.ts);
+        expect(fullBody.nextCursor!.id).toBe(oldest.transferId);
+      });
+    });
+
+    it("second page: cursor fetches rows strictly older than (ts, id)", async () => {
+      await withTempDb(async () => {
+        seedPersona(DEFAULT_BALANCES);
+        const ids: string[] = [];
+        for (let i = 0; i < 5; i++) {
+          if (i > 0) await new Promise((r) => setTimeout(r, 3));
+          const res = await POST(
+            makeJsonRequest({ from: "bkash", to: "nagad", amountBdt: 1 }),
+          );
+          ids.push(
+            ((await res.json()) as { transfer: { transferId: string } })
+              .transfer.transferId,
+          );
+        }
+
+        // Page 1: limit 2 → newest two.
+        const page1 = await GET(makeGetRequest({ limit: "2" }));
+        const page1Body = (await page1.json()) as {
+          transfers: Array<{ transferId: string; ts: number }>;
+          nextCursor: { ts: number; id: string } | null;
+        };
+        expect(page1Body.transfers.map((t) => t.transferId)).toEqual([
+          ids[4]!,
+          ids[3]!,
+        ]);
+        expect(page1Body.nextCursor).not.toBeNull();
+
+        // Page 2: feed the cursor back.
+        const page2 = await GET(
+          makeGetRequest({
+            limit: "2",
+            beforeTs: String(page1Body.nextCursor!.ts),
+            beforeId: page1Body.nextCursor!.id,
+          }),
+        );
+        const page2Body = (await page2.json()) as {
+          transfers: Array<{ transferId: string }>;
+          nextCursor: { ts: number; id: string } | null;
+        };
+        expect(page2Body.transfers.map((t) => t.transferId)).toEqual([
+          ids[2]!,
+          ids[1]!,
+        ]);
+        expect(page2Body.nextCursor).not.toBeNull();
+
+        // Page 3: short page → no further cursor.
+        const page3 = await GET(
+          makeGetRequest({
+            limit: "2",
+            beforeTs: String(page2Body.nextCursor!.ts),
+            beforeId: page2Body.nextCursor!.id,
+          }),
+        );
+        const page3Body = (await page3.json()) as {
+          transfers: Array<{ transferId: string }>;
+          nextCursor: { ts: number; id: string } | null;
+        };
+        expect(page3Body.transfers.map((t) => t.transferId)).toEqual([
+          ids[0]!,
+        ]);
+        expect(page3Body.nextCursor).toBeNull();
+      });
+    });
+
+    it("returns 400 when only one side of the cursor is provided", async () => {
+      await withTempDb(async () => {
+        seedPersona(DEFAULT_BALANCES);
+        // Only beforeTs — beforeId is missing.
+        const res = await GET(
+          makeGetRequest({
+            limit: "5",
+            beforeTs: String(Date.now()),
+          }),
+        );
+        expect(res.status).toBe(400);
+        const body = (await res.json()) as { error?: string };
+        expect(body.error).toMatch(/beforeTs and beforeId/);
+      });
+    });
+
+    it("returns 400 when beforeId is not 32-char hex", async () => {
+      await withTempDb(async () => {
+        seedPersona(DEFAULT_BALANCES);
+        const res = await GET(
+          makeGetRequest({
+            limit: "5",
+            beforeTs: String(Date.now()),
+            beforeId: "not-a-valid-id",
+          }),
+        );
+        expect(res.status).toBe(400);
+        const body = (await res.json()) as { error?: string };
+        expect(body.error).toMatch(/beforeId must be a 32-char hex/);
+      });
+    });
+
+    it("returns 422 when no active persona is set, even with cursor params", async () => {
+      await withTempDb(async () => {
+        // Seed a persona but leave meta.active_persona unset.
+        const db = getDb();
+        db.prepare(
+          `INSERT INTO personas
+             (id, display_name, opening_bkash, opening_nagad, opening_rocket,
+              inflow_rate, volatility)
+           VALUES (?, 'No Active', 1, 1, 1, 1.0, 0.10)`,
+        ).run(PERSONA);
+        // Both sides of the cursor are well-formed so the cursor
+        // parser returns ok, but the persona precondition fires
+        // before the binding is touched.
+        const res = await GET(
+          makeGetRequest({
+            limit: "5",
+            beforeTs: "1700000000000",
+            beforeId: "0".repeat(32),
+          }),
+        );
+        expect(res.status).toBe(422);
+      });
+    });
   });
 });

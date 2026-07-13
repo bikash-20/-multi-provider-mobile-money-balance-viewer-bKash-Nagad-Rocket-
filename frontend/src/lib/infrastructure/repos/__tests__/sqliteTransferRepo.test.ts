@@ -5,7 +5,7 @@ import { describe, it, expect } from "vitest";
 import { freshMigratedDb } from "@/__tests__/migratedDb";
 import { SqliteTransferRepo } from "../sqliteTransferRepo";
 import { SqliteBalanceRepo } from "../sqliteBalanceRepo";
-import { newTransferId } from "@/lib/domain/transferId";
+import { newTransferId, withFixedTransferIdClock } from "@/lib/domain/transferId";
 import {
   TransferConflictError,
   TransferNotFoundError,
@@ -424,5 +424,162 @@ describe("SqliteTransferRepo", () => {
     expect(forward!.reversesTransferId).toBeNull();
     expect(forward!.fromProvider).toBe("bkash");
     expect(forward!.toProvider).toBe("nagad");
+  });
+
+  // ─── Phase 9: keyset pagination ───────────────────────────────────
+
+  it("recentPage: returns an empty list for a persona with no transfers", async () => {
+    const { db, personaId } = freshMigratedDb();
+    const transfers = new SqliteTransferRepo(db);
+    const page = await transfers.recentPage(personaId, { limit: 10 });
+    expect(page).toEqual([]);
+  });
+
+  it("recentPage: first page returns up to `limit` rows newest-first", async () => {
+    const { db, personaId } = freshMigratedDb();
+    const transfers = new SqliteTransferRepo(db);
+    const balances = new SqliteBalanceRepo(db);
+
+    // Seed 5 forwards with one wall-clock ms between each so the
+    // (ts DESC, transfer_id DESC) order is deterministic. The binding
+    // *does* tie-break on transfer_id (UUIDv7 hex), but asserting on
+    // explicit order is cleaner here than characterizing the tie.
+    const seeded: { id: string; ts: number }[] = [];
+    for (let i = 0; i < 5; i++) {
+      const { originalId } = await seedForward(transfers, balances, personaId);
+      const row = await transfers.byId(originalId);
+      seeded.push({ id: originalId, ts: row!.ts });
+      await new Promise((r) => setTimeout(r, 2));
+    }
+
+    const page = await transfers.recentPage(personaId, { limit: 3 });
+    expect(page.length).toBe(3);
+    // Newest first (last seeded is at index 0).
+    expect(page[0]!.transferId).toBe(seeded[4].id);
+    expect(page[1]!.transferId).toBe(seeded[3].id);
+    expect(page[2]!.transferId).toBe(seeded[2].id);
+    expect(page[2]!.ts).toBe(seeded[2].ts);
+  });
+
+  it("recentPage: with a cursor, returns rows strictly older than (ts, id)", async () => {
+    const { db, personaId } = freshMigratedDb();
+    const transfers = new SqliteTransferRepo(db);
+    const balances = new SqliteBalanceRepo(db);
+
+    const seeded: { id: string; ts: number }[] = [];
+    for (let i = 0; i < 4; i++) {
+      const { originalId } = await seedForward(transfers, balances, personaId);
+      const row = await transfers.byId(originalId);
+      seeded.push({ id: originalId, ts: row!.ts });
+      await new Promise((r) => setTimeout(r, 2));
+    }
+
+    // Page 1: limit 2 → newest two.
+    const page1 = await transfers.recentPage(personaId, { limit: 2 });
+    expect(page1.length).toBe(2);
+    expect(page1[0]!.transferId).toBe(seeded[3].id);
+    expect(page1[1]!.transferId).toBe(seeded[2].id);
+
+    // Page 2: cursor = oldest row on page 1.
+    const page2 = await transfers.recentPage(personaId, {
+      limit: 2,
+      before: { ts: page1[1]!.ts, id: page1[1]!.transferId },
+    });
+    expect(page2.length).toBe(2);
+    expect(page2[0]!.transferId).toBe(seeded[1].id);
+    expect(page2[1]!.transferId).toBe(seeded[0].id);
+
+    // Page 3: should be empty (history exhausted).
+    const page3 = await transfers.recentPage(personaId, {
+      limit: 2,
+      before: { ts: page2[1]!.ts, id: page2[1]!.transferId },
+    });
+    expect(page3).toEqual([]);
+  });
+
+  it("recentPage: composite (ts, id) cursor is tie-break-stable within a millisecond", async () => {
+    // Same-ms collisions are realistic on a fast loop. The composite
+    // cursor disambiguates them via the secondary sort on
+    // transfer_id, so paging should not drop or duplicate rows when
+    // timestamps tie.
+    const { db, personaId } = freshMigratedDb();
+    const transfers = new SqliteTransferRepo(db);
+    const balances = new SqliteBalanceRepo(db);
+
+    // Pre-mint three transfer ids under a pinned timestamp clock so
+    // they share the same `ts` ms; then commit them in sequence. This
+    // sidesteps `withFixedTransferIdClock`'s sync-only boundary for
+    // async work.
+    const PINNED = 1_700_000_000_000;
+    const ids: string[] = [];
+    withFixedTransferIdClock(PINNED, () => {
+      for (let i = 0; i < 3; i++) ids.push(newTransferId() as string);
+    });
+
+    for (const id of ids) {
+      const before = await balances.listByPersona(personaId);
+      await transfers.commit({
+        transferId: id as never,
+        personaId,
+        fromProvider: "bkash",
+        toProvider: "nagad",
+        amountBdt: 1_000 as never,
+        fromExpectedVersion: before.find((b) => b.providerId === "bkash")!
+          .versionId,
+        toExpectedVersion: before.find((b) => b.providerId === "nagad")!
+          .versionId,
+        note: "",
+      });
+    }
+
+    const page1 = await transfers.recentPage(personaId, { limit: 2 });
+    expect(page1.length).toBe(2);
+
+    const page2 = await transfers.recentPage(personaId, {
+      limit: 2,
+      before: { ts: page1[1]!.ts, id: page1[1]!.transferId },
+    });
+    expect(page2.length).toBe(1);
+
+    // No duplicate ids across pages — every seeded row appears exactly
+    // once even though all three share the same ms timestamp.
+    const all = [...page1, ...page2];
+    expect(all.length).toBe(3);
+    expect(new Set(all.map((t) => t.transferId)).size).toBe(all.length);
+    for (const id of ids) {
+      expect(all.find((t) => t.transferId === id)).toBeDefined();
+    }
+  });
+
+  it("recentPage: a cursor before the earliest row returns an empty page", async () => {
+    const { db, personaId } = freshMigratedDb();
+    const transfers = new SqliteTransferRepo(db);
+    const balances = new SqliteBalanceRepo(db);
+    await seedForward(transfers, balances, personaId);
+
+    // Cursor ts=0 means the SQL tuple-comparison `(< 0, < "00...")`
+    // excludes every row (seeded `ts` is wall-clock-now, far above 0).
+    const empty = await transfers.recentPage(personaId, {
+      limit: 10,
+      before: { ts: 0, id: "00000000000000000000000000000000" as never },
+    });
+    expect(empty).toEqual([]);
+  });
+
+  it("recent: is a thin wrapper over recentPage({limit}) and matches", async () => {
+    const { db, personaId } = freshMigratedDb();
+    const transfers = new SqliteTransferRepo(db);
+    const balances = new SqliteBalanceRepo(db);
+    const seeded: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const { originalId } = await seedForward(transfers, balances, personaId);
+      seeded.push(originalId);
+    }
+
+    const viaRecent = await transfers.recent(personaId, 10);
+    const viaPage = await transfers.recentPage(personaId, { limit: 10 });
+    expect(viaRecent.map((t) => t.transferId)).toEqual(
+      viaPage.map((t) => t.transferId),
+    );
   });
 });

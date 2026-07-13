@@ -63,6 +63,16 @@ interface RecentEntriesProps {
   /** Transfer ids currently mid-POST. Used by the row to disable
    *  itself and show a spinner. */
   reversingIds?: ReadonlySet<string>;
+  /** Phase 9: when true, render a "Load older" footer that fetches
+   *  the next keyset page from the server. When false (or undefined)
+   *  we render no footer — the parent has the full list already. */
+  hasMore?: boolean;
+  /** Phase 9: while a "Load older" request is in flight, the button
+   *  shows a spinner and ignores further clicks. */
+  loadingOlder?: boolean;
+  /** Phase 9: invoked when the user clicks "Load older". The parent
+   *  owns the cursor state and the append logic. */
+  onLoadOlder?: () => Promise<void> | void;
 }
 
 interface EntryRow {
@@ -99,6 +109,9 @@ export function RecentEntries({
   onReverse,
   alreadyReversedIds,
   reversingIds,
+  hasMore,
+  loadingOlder,
+  onLoadOlder,
 }: RecentEntriesProps) {
   const [open, setOpen] = useState(true);
 
@@ -183,6 +196,30 @@ export function RecentEntries({
               )}
             </ul>
           )}
+
+          {/* Phase 9: keyset pagination footer. Renders only when the
+              parent tells us there's another page; while loading, the
+              button disables and the label switches to "Loading…".
+              When the cursor is null and at least one row is shown,
+              we surface an "End of history" hint so the user knows
+              they reached the bottom without an empty footer flash. */}
+          {hasMore && onLoadOlder ? (
+            <div className="border-t border-border px-4 py-3 sm:px-5">
+              <button
+                type="button"
+                onClick={() => void onLoadOlder()}
+                disabled={loadingOlder}
+                className="w-full rounded-md border border-border px-3 py-2 text-xs font-semibold text-muted transition hover:border-ink/30 hover:bg-surface-2 hover:text-ink disabled:opacity-50"
+                aria-label="Load older activity"
+              >
+                {loadingOlder ? "Loading older activity…" : "Load older activity"}
+              </button>
+            </div>
+          ) : rows.length > 0 ? (
+            <p className="border-t border-border px-4 py-2 text-center text-[10px] uppercase tracking-wide text-muted sm:px-5">
+              End of history
+            </p>
+          ) : null}
         </div>
       )}
     </section>

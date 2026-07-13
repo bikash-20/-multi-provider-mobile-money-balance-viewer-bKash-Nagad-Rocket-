@@ -69,8 +69,32 @@ export interface TransferRepo {
    * rows appear in the same list as forward rows — callers that want
    * to highlight "already reversed" pairs should compare each row's
    * `reversesTransferId` against the rest of the page.
+   *
+   * Convenience wrapper around `recentPage({ limit })`; no cursor.
    */
   recent(personaId: string, limit: number): Promise<Transfer[]>;
+
+  /**
+   * Keyset-paginated page of transfers for a persona, newest first.
+   *
+   * Phase 9: backed by `WHERE (ts, transfer_id) < (?, ?) ORDER BY
+   * ts DESC, transfer_id DESC LIMIT ?`. The composite cursor is
+   * stable because `transfer_id` is UUIDv7 (sortable), so pagination
+   * works even when multiple rows share a millisecond timestamp.
+   *
+   * Pass `before` as `{ ts, id }` taken from `nextCursor` of a prior
+   * page to fetch the *next* page (rows strictly older than the
+   * cursor). Omit it for the first page.
+   *
+   * The cursor is opaque to clients but the shape is documented:
+   * `{ ts: number /* ms epoch *\/, id: TransferIdT }`. Pagination
+   * belongs in the binding so the SQL stays consistent across
+   * adapters.
+   */
+  recentPage(
+    personaId: string,
+    opts: { limit: number; before?: { ts: number; id: TransferIdT } },
+  ): Promise<Transfer[]>;
 }
 
 export class TransferConflictError extends Error {

@@ -79,6 +79,38 @@ export class SqliteTransferRepo implements TransferRepo {
   }
 
   recent(personaId: string, limit: number) {
+    return this.recentPage(personaId, { limit });
+  }
+
+  recentPage(
+    personaId: string,
+    opts: { limit: number; before?: { ts: number; id: TransferIdT } },
+  ) {
+    if (opts.before) {
+      // Keyset page: rows strictly older than the cursor. The
+      // composite (`ts`, `transfer_id`) tuple comparison is stable
+      // because `transfer_id` is UUIDv7, so two rows that share a ms
+      // timestamp are still ordered deterministically.
+      const rows = this.db
+        .prepare<
+          [string, number, string, number],
+          TransferRow
+        >(
+          `SELECT ${TRANSFER_COLUMNS}
+           FROM transfers
+           WHERE persona_id = ?
+             AND (ts, transfer_id) < (?, ?)
+           ORDER BY ts DESC, transfer_id DESC
+           LIMIT ?`,
+        )
+        .all(
+          personaId,
+          opts.before.ts,
+          opts.before.id as string,
+          opts.limit,
+        );
+      return Promise.resolve(rows.map(transferFromRow));
+    }
     const rows = this.db
       .prepare<[string, number], TransferRow>(
         `SELECT ${TRANSFER_COLUMNS}
@@ -87,7 +119,7 @@ export class SqliteTransferRepo implements TransferRepo {
          ORDER BY ts DESC, transfer_id DESC
          LIMIT ?`,
       )
-      .all(personaId, limit);
+      .all(personaId, opts.limit);
     return Promise.resolve(rows.map(transferFromRow));
   }
 

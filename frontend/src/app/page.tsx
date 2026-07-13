@@ -67,6 +67,17 @@ export default function HomePage() {
   const [meta, setMeta] = useState<MetaSnapshot | null>(null);
   const [transferFrom, setTransferFrom] = useState<Provider | null>(null);
   const [transfers, setTransfers] = useState<ReadonlyArray<Transfer>>([]);
+  // Phase 9: keyset cursor for "Load older" pagination on the
+  // transfers list. `null` means we're at the head of the history
+  // and need to fetch page 1; `null` nextCursor on the response means
+  // end-of-history. We deliberately hold cursor state here (rather
+  // than recomputing on every render) so the "Load older" button can
+  // be debounced without re-fetching page 1.
+  const [transferCursor, setTransferCursor] = useState<{
+    ts: number;
+    id: string;
+  } | null>(null);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   // Ids currently mid-POST against /api/transfers/[id]/reverse. The
   // RecentEntries row uses this to disable its button + show a spinner.
   const [reversingIds, setReversingIds] = useState<ReadonlySet<string>>(
@@ -95,14 +106,20 @@ export default function HomePage() {
         const snapshot: MetaSnapshot | null = metaRes.ok
           ? ((await metaRes.json()) as MetaSnapshot)
           : null;
-        const transfersList: ReadonlyArray<Transfer> = transfersRes.ok
-          ? (((await transfersRes.json()) as { transfers: Transfer[] })
-              .transfers ?? [])
-          : [];
+        const transfersPayload: {
+          transfers: Transfer[];
+          nextCursor: { ts: number; id: string } | null;
+        } = transfersRes.ok
+          ? ((await transfersRes.json()) as {
+              transfers: Transfer[];
+              nextCursor: { ts: number; id: string } | null;
+            })
+          : { transfers: [], nextCursor: null };
         if (!cancelled) {
           dispatch({ type: "set_entries", entries });
           setMeta(snapshot);
-          setTransfers(transfersList);
+          setTransfers(transfersPayload.transfers);
+          setTransferCursor(transfersPayload.nextCursor);
           setLoading(false);
         }
       } catch (err) {
@@ -227,18 +244,63 @@ export default function HomePage() {
     }
   }, []);
 
+  // Phase 9: page-1 fetcher. Used by `refetchAll` after a commit /
+  // reverse / persona-switch so the list always starts from the head
+  // of history. Subsequent older pages come from `loadOlderTransfers`.
   const refetchTransfers = useCallback(async () => {
     try {
       const res = await fetch("/api/transfers", { cache: "no-store" });
       if (!res.ok) return; // 422 on cold start is fine — keep prior list.
-      const list = ((await res.json()) as { transfers: Transfer[] }).transfers;
-      setTransfers(list ?? []);
+      const payload = (await res.json()) as {
+        transfers: Transfer[];
+        nextCursor: { ts: number; id: string } | null;
+      };
+      setTransfers(payload.transfers ?? []);
+      setTransferCursor(payload.nextCursor ?? null);
     } catch {
       // Transfer refetch is best-effort — the balance log is still
       // authoritative for the row totals. We don't surface this as a
       // banner to avoid masking a more important balance error.
     }
   }, []);
+
+  // Phase 9: append the next page of older transfers to the list.
+  // No-op when we're already at end-of-history (cursor === null) or
+  // when a load is in flight.
+  const loadOlderTransfers = useCallback(async () => {
+    if (transferCursor === null || loadingOlder) return;
+    setLoadingOlder(true);
+    try {
+      const params = new URLSearchParams({
+        beforeTs: String(transferCursor.ts),
+        beforeId: transferCursor.id,
+      });
+      const res = await fetch(`/api/transfers?${params}`, {
+        cache: "no-store",
+      });
+      if (!res.ok) return; // 422 / 400 — leave the list as it is.
+      const payload = (await res.json()) as {
+        transfers: Transfer[];
+        nextCursor: { ts: number; id: string } | null;
+      };
+      setTransfers((prev) => {
+        // Guard against duplicate ids: a row that scrolls in at the
+        // boundary between two requests could in principle appear in
+        // both. Keyset semantics make this impossible when the
+        // binding is correct, but a Set dedupe is cheap insurance
+        // and keeps the row map deterministic.
+        const seen = new Set(prev.map((t) => t.transferId));
+        const merged = [
+          ...prev,
+          ...(payload.transfers ?? []).filter((t) => !seen.has(t.transferId)),
+        ];
+        return merged;
+      });
+      setTransferCursor(payload.nextCursor ?? null);
+    } finally {
+      setLoadingOlder(false);
+    }
+  }, [transferCursor, loadingOlder]);
 
   const refetchAll = useCallback(async () => {
     await Promise.all([refetchEntries(), refetchTransfers()]);
@@ -385,6 +447,9 @@ export default function HomePage() {
               onReverse={handleReverseTransfer}
               alreadyReversedIds={alreadyReversedIds}
               reversingIds={reversingIds}
+              hasMore={transferCursor !== null}
+              loadingOlder={loadingOlder}
+              onLoadOlder={loadOlderTransfers}
             />
           </>
         )}

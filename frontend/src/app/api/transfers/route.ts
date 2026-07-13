@@ -38,10 +38,17 @@ import {
   TransferConflictError,
 } from "@/lib/domain/repositories/transferRepo";
 import { bdtToPaise } from "@/lib/domain/money";
-import { newTransferId } from "@/lib/domain/transferId";
+import { newTransferId, type TransferIdT } from "@/lib/domain/transferId";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
+
+/**
+ * Transfer ids are UUIDv7 — 32 chars of lowercase hex (see
+ * `lib/domain/transferId.ts`). Same shape as the `/reverse` route
+ * enforces for its URL segment.
+ */
+const TRANSFER_ID_RE = /^[0-9a-f]{32}$/i;
 
 const MAX_NOTE_LEN = 120;
 const MAX_IDEMPOTENCY_KEY_LEN = 64;
@@ -187,6 +194,57 @@ function parseLimit(raw: string | null): {
   return { ok: true, value: n };
 }
 
+/**
+ * Phase 9: keyset cursor. `beforeTs` is a positive ms-epoch integer
+ * (the row's `ts`); `beforeId` is the same row's transfer_id.
+ *
+ * Either param is allowed individually, but the binding uses them as
+ * a composite tuple `(ts, transfer_id)`. Omitting either side of the
+ * composite is a logical error on the client, so we reject a partial
+ * cursor with 400 rather than silently falling back to the first page.
+ */
+function parseCursor(
+  rawTs: string | null,
+  rawId: string | null,
+): {
+  ok: true;
+  value: { ts: number; id: TransferIdT } | null;
+} | { ok: false; status: 400; error: string } {
+  const hasTs = rawTs !== null;
+  const hasId = rawId !== null;
+  if (!hasTs && !hasId) return { ok: true, value: null };
+  if (hasTs !== hasId) {
+    return {
+      ok: false,
+      status: 400,
+      error: "beforeTs and beforeId must be provided together.",
+    };
+  }
+  if (!/^\d+$/.test(rawTs as string)) {
+    return {
+      ok: false,
+      status: 400,
+      error: "beforeTs must be a non-negative integer (ms epoch).",
+    };
+  }
+  const ts = Number(rawTs);
+  if (!Number.isFinite(ts) || ts < 0) {
+    return {
+      ok: false,
+      status: 400,
+      error: "beforeTs must be a non-negative integer (ms epoch).",
+    };
+  }
+  if (!TRANSFER_ID_RE.test(rawId as string)) {
+    return {
+      ok: false,
+      status: 400,
+      error: "beforeId must be a 32-char hex transfer id.",
+    };
+  }
+  return { ok: true, value: { ts, id: rawId as unknown as TransferIdT } };
+}
+
 export async function POST(req: Request) {
   // 1. Header check first — fail-fast on a malformed key rather than
   //    going through JSON parsing that may not even be needed.
@@ -313,6 +371,13 @@ export async function GET(req: Request) {
   if (!limitCheck.ok) {
     return NextResponse.json(limitCheck, { status: 400 });
   }
+  const cursorCheck = parseCursor(
+    url.searchParams.get("beforeTs"),
+    url.searchParams.get("beforeId"),
+  );
+  if (!cursorCheck.ok) {
+    return NextResponse.json(cursorCheck, { status: 400 });
+  }
 
   const personaId = readActivePersona();
   if (!personaId) {
@@ -324,9 +389,26 @@ export async function GET(req: Request) {
 
   try {
     const { transfers } = getRepositories(getDb());
-    const list = await transfers.recent(personaId, limitCheck.value);
+    const list = await transfers.recentPage(personaId, {
+      limit: limitCheck.value,
+      before: cursorCheck.value ?? undefined,
+    });
+
+    // If the page is full, there may be more rows. Emit a cursor
+    // pointing at the LAST row (oldest on this page); clients feed
+    // that back as `beforeTs` + `beforeId` to fetch the next page.
+    // We do NOT emit a cursor on a short page — that signals the
+    // end of history without an extra round-trip.
+    const nextCursor =
+      list.length === limitCheck.value
+        ? {
+            ts: list[list.length - 1]!.ts,
+            id: list[list.length - 1]!.transferId,
+          }
+        : null;
+
     return NextResponse.json(
-      { transfers: list, personaId },
+      { transfers: list, personaId, nextCursor },
       { status: 200 },
     );
   } catch {
