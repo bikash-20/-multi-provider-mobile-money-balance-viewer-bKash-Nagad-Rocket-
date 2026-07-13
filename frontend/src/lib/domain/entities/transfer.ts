@@ -6,6 +6,11 @@
  * and from_after/to_after). The CHECK constraints in 001_init.sql enforce
  * `from_delta = -amount` and `to_delta = +amount`; this entity mirrors
  * those invariants at the type level so callers don't need to remember.
+ *
+ * Phase 8: a transfer can be a reversal of an earlier one — when
+ * `reversesTransferId` is non-null it points at the row this entry
+ * undoes. The compensation is stored as a NEW row (never as an UPDATE
+ * or DELETE) so the append-only ledger invariant is preserved.
  */
 import type { Paise } from "../money";
 import type { ProviderId } from "../providerId";
@@ -25,6 +30,12 @@ export interface Transfer {
   readonly toVersion: number;
   readonly note: string;
   readonly ts: number;
+  /**
+   * When this row is a compensating reversal, the transferId of the
+   * original it undoes. Null for the common case (a forward move).
+   * Read-only — only `commitReverse` sets it.
+   */
+  readonly reversesTransferId: TransferIdT | null;
 }
 
 export function transferFromRow(row: {
@@ -41,6 +52,7 @@ export function transferFromRow(row: {
   to_version: number;
   note: string;
   ts: number;
+  reverses_transfer_id: string | null;
 }): Transfer {
   return Object.freeze({
     transferId: row.transfer_id as TransferIdT,
@@ -56,5 +68,8 @@ export function transferFromRow(row: {
     toVersion: row.to_version,
     note: row.note,
     ts: row.ts,
+    reversesTransferId: (row.reverses_transfer_id ?? null) as
+      | TransferIdT
+      | null,
   });
 }

@@ -67,6 +67,14 @@ export default function HomePage() {
   const [meta, setMeta] = useState<MetaSnapshot | null>(null);
   const [transferFrom, setTransferFrom] = useState<Provider | null>(null);
   const [transfers, setTransfers] = useState<ReadonlyArray<Transfer>>([]);
+  // Ids currently mid-POST against /api/transfers/[id]/reverse. The
+  // RecentEntries row uses this to disable its button + show a spinner.
+  const [reversingIds, setReversingIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  // Surfaced to the user when a reverse fails — distinct from the
+  // balance-error banner so a stale row doesn't drown the latest one.
+  const [reverseError, setReverseError] = useState<string | null>(null);
 
   // Initial fetch — server is the source of truth. Both /api/entries
   // and /api/meta fire in parallel; whichever resolves first paints
@@ -250,6 +258,71 @@ export default function HomePage() {
     void refetchAll();
   }, [refetchAll]);
 
+  // Derived from `transfers`: an original's id appears in this set iff
+  // at least one row points back at it via `reversesTransferId`. We
+  // never store this as a separate field — a refresh of the transfers
+  // list is what flips it, so the UI cannot disagree with the server.
+  const alreadyReversedIds = useMemo<ReadonlySet<string>>(() => {
+    const s = new Set<string>();
+    for (const t of transfers) {
+      if (t.reversesTransferId) s.add(t.reversesTransferId);
+    }
+    return s;
+  }, [transfers]);
+
+  // Phase 8: POST a compensation. The row UI only sends an intent +
+  // optional free-text reason; this handler owns the HTTP call,
+  // optimistic bookkeeping, and the post-success refetch.
+  const handleReverseTransfer = useCallback(
+    async (transferId: string, reason: string) => {
+      // Mark the row as in-flight so its button shows "Reversing…" and
+      // cannot be clicked twice.
+      setReversingIds((prev) => {
+        const next = new Set(prev);
+        next.add(transferId);
+        return next;
+      });
+      setReverseError(null);
+      try {
+        const res = await fetch(
+          `/api/transfers/${encodeURIComponent(transferId)}/reverse`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ reason }),
+          },
+        );
+        if (!res.ok) {
+          const body = (await res.json().catch(() => ({}))) as {
+            error?: string;
+          };
+          throw new Error(body.error ?? `POST .../reverse returned ${res.status}`);
+        }
+        // Success — refetch balances AND transfers so the new row
+        // appears in RecentEntries and the totals on each card reflect
+        // the inverse leg.
+        await refetchAll();
+      } catch (err) {
+        // 4xx / 5xx / network — surface inline without rolling back
+        // anything (no optimistic insert happened client-side; the
+        // server never saw a request, or it rejected it).
+        setReverseError(
+          err instanceof Error
+            ? `Couldn't reverse transfer: ${err.message}`
+            : "Couldn't reverse transfer.",
+        );
+      } finally {
+        setReversingIds((prev) => {
+          if (!prev.has(transferId)) return prev;
+          const next = new Set(prev);
+          next.delete(transferId);
+          return next;
+        });
+      }
+    },
+    [refetchAll],
+  );
+
   return (
     <AppShell meta={meta} onPersonaSwitched={handlePersonaSwitched}>
       <div className="flex flex-col gap-4 sm:gap-5">
@@ -273,6 +346,15 @@ export default function HomePage() {
                 className="rounded-lg border border-signal/40 bg-signal-soft/60 px-3 py-2 text-sm text-ink"
               >
                 {error}
+              </div>
+            )}
+
+            {reverseError && (
+              <div
+                role="alert"
+                className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-sm text-rose-900"
+              >
+                {reverseError}
               </div>
             )}
 
@@ -300,6 +382,9 @@ export default function HomePage() {
               transfers={transfers}
               previousByProvider={previousByProvider}
               freshIds={freshIds}
+              onReverse={handleReverseTransfer}
+              alreadyReversedIds={alreadyReversedIds}
+              reversingIds={reversingIds}
             />
           </>
         )}

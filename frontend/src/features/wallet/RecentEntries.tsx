@@ -17,6 +17,14 @@
  * Phase 7: accepts a `transfers` prop and interleaves them with the
  * balance log by timestamp. The page passes an empty array when no
  * transfers exist yet (or no persona is active).
+ *
+ * Phase 8: forwards rows to the transfer dialog's reverse flow. The
+ * page supplies an `onReverse(transferId, reason)` callback, the set
+ * of ids that already have a compensating row, and the set of ids
+ * currently mid-POST so the button can show a spinner / disable
+ * itself. The row itself never knows how to talk to the server — it
+ * just bubbles an intent upward. That keeps this component testable
+ * with a click handler only and lets the page own retry / jitter.
  */
 
 import { useMemo, useState } from "react";
@@ -39,6 +47,22 @@ interface RecentEntriesProps {
    *  animation only on initial appearance (not on every re-render of
    *  an existing row). */
   freshIds?: ReadonlySet<string>;
+  /** Forwarded from the page's reverseTransfer handler. Resolves once
+   *  the POST returns (regardless of status) so the row can clear its
+   *  pending state. Receives a free-text reason from the inline
+   *  textarea (≤ 120 chars, matching the route's MAX_REASON_LEN). */
+  onReverse?: (
+    transferId: string,
+    reason: string,
+  ) => Promise<void> | void;
+  /** Transfer ids that already have a compensating row attached. The
+   *  caller builds this from the same `transfers` array (matching by
+   *  `reversesTransferId`) — we don't recompute it here so the page
+   *  controls the refresh cadence after a POST. */
+  alreadyReversedIds?: ReadonlySet<string>;
+  /** Transfer ids currently mid-POST. Used by the row to disable
+   *  itself and show a spinner. */
+  reversingIds?: ReadonlySet<string>;
 }
 
 interface EntryRow {
@@ -55,6 +79,14 @@ interface TransferRow {
   ts: number;
   key: string;
   transfer: Transfer;
+  // Derived: is this row itself a compensating transfer (i.e. it's
+  // already a reversal)? When true we render the "Reversed" badge and
+  // never expose the Reverse button.
+  isCompensation: boolean;
+  // Derived: does some OTHER row in this page point back at this one
+  // via `reversesTransferId`? When true, the original has already
+  // been reversed and we hide the affordance.
+  originalIsReversed: boolean;
 }
 
 type AnyRow = EntryRow | TransferRow;
@@ -64,6 +96,9 @@ export function RecentEntries({
   transfers,
   previousByProvider,
   freshIds,
+  onReverse,
+  alreadyReversedIds,
+  reversingIds,
 }: RecentEntriesProps) {
   const [open, setOpen] = useState(true);
 
@@ -84,9 +119,13 @@ export function RecentEntries({
       ts: t.ts,
       key: `tx:${t.transferId}`,
       transfer: t,
+      isCompensation: t.reversesTransferId !== null,
+      originalIsReversed: Boolean(
+        (alreadyReversedIds ?? new Set<string>()).has(t.transferId),
+      ),
     }));
     return [...balanceRows, ...transferRows].sort((a, b) => b.ts - a.ts);
-  }, [entries, transfers, previousByProvider, freshIds]);
+  }, [entries, transfers, previousByProvider, freshIds, alreadyReversedIds]);
 
   const totalCount = entries.length + (transfers?.length ?? 0);
 
@@ -131,6 +170,14 @@ export function RecentEntries({
                   <TransferRowView
                     key={row.key}
                     transfer={row.transfer}
+                    isCompensation={row.isCompensation}
+                    originalIsReversed={row.originalIsReversed}
+                    pending={Boolean(
+                      (reversingIds ?? new Set<string>()).has(
+                        row.transfer.transferId,
+                      ),
+                    )}
+                    onReverse={onReverse}
                   />
                 ),
               )}
@@ -184,48 +231,147 @@ function BalanceRowView({
   );
 }
 
-function TransferRowView({ transfer }: { transfer: Transfer }) {
-  // Render: "bKash → Nagad ৳100.00" with a two-dot indicator that
-  // mirrors the source/target colour. The note (if any) renders
-  // underneath as a faint second line.
+function TransferRowView({
+  transfer,
+  isCompensation,
+  originalIsReversed,
+  pending,
+  onReverse,
+}: {
+  transfer: Transfer;
+  isCompensation: boolean;
+  originalIsReversed: boolean;
+  pending: boolean;
+  onReverse?: (
+    transferId: string,
+    reason: string,
+  ) => Promise<void> | void;
+}) {
+  // Two-stage confirm: first click reveals the textarea + Confirm/Cancel
+  // buttons; second click submits. Cancel collapses the panel without
+  // POSTing. We hold the reason locally so the page doesn't need to
+  // track per-row state.
+  const [confirming, setConfirming] = useState(false);
+  const [reason, setReason] = useState("");
+
+  const showReverseButton =
+    !isCompensation && !originalIsReversed && onReverse !== undefined;
+
+  const submit = () => {
+    if (!onReverse) return;
+    const trimmed = reason.trim().slice(0, 120);
+    setConfirming(false);
+    setReason("");
+    void onReverse(transfer.transferId, trimmed);
+  };
+
+  const cancel = () => {
+    setConfirming(false);
+    setReason("");
+  };
+
   const amountBdt = (transfer.amountBdt as number) / 100;
+
   return (
-    <li className="flex items-center gap-3 px-4 py-3 sm:px-5">
-      <div className="flex flex-none items-center gap-1" aria-hidden>
-        <span
-          className="inline-block h-2 w-2 rounded-full"
-          style={{ background: PROVIDER_HEX[transfer.fromProvider] }}
-        />
-        <ArrowIcon />
-        <span
-          className="inline-block h-2 w-2 rounded-full"
-          style={{ background: PROVIDER_HEX[transfer.toProvider] }}
-        />
-      </div>
-      <span className="min-w-0 flex-1">
-        <span className="block text-xs font-semibold text-ink">
-          {PROVIDER_LABEL[transfer.fromProvider]}
-          <span className="mx-1 text-muted" aria-hidden>→</span>
-          {PROVIDER_LABEL[transfer.toProvider]}
-          <span className="num ml-2 text-ink">{formatBDT(amountBdt)}</span>
+    <li className="flex flex-col gap-2 px-4 py-3 sm:px-5">
+      <div className="flex items-center gap-3">
+        <div className="flex flex-none items-center gap-1" aria-hidden>
+          <span
+            className="inline-block h-2 w-2 rounded-full"
+            style={{ background: PROVIDER_HEX[transfer.fromProvider] }}
+          />
+          <ArrowIcon />
+          <span
+            className="inline-block h-2 w-2 rounded-full"
+            style={{ background: PROVIDER_HEX[transfer.toProvider] }}
+          />
+        </div>
+        <span className="min-w-0 flex-1">
+          <span className="block text-xs font-semibold text-ink">
+            {PROVIDER_LABEL[transfer.fromProvider]}
+            <span className="mx-1 text-muted" aria-hidden>→</span>
+            {PROVIDER_LABEL[transfer.toProvider]}
+            <span className="num ml-2 text-ink">{formatBDT(amountBdt)}</span>
+            {isCompensation ? (
+              <span
+                className="ml-2 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-900"
+                title="This row reverses a previous transfer."
+              >
+                Reversed
+              </span>
+            ) : null}
+          </span>
+          {transfer.note ? (
+            <span className="block truncate text-[11px] text-muted">
+              {transfer.note}
+            </span>
+          ) : (
+            <span className="num block text-[11px] text-muted">
+              {formatBDT(transfer.fromAfter as number)} →{" "}
+              {formatBDT(transfer.toAfter as number)}
+            </span>
+          )}
         </span>
-        {transfer.note ? (
-          <span className="block truncate text-[11px] text-muted">
-            {transfer.note}
-          </span>
-        ) : (
-          <span className="num block text-[11px] text-muted">
-            {formatBDT(transfer.fromAfter as number)} →{" "}
-            {formatBDT(transfer.toAfter as number)}
-          </span>
-        )}
-      </span>
-      <time
-        dateTime={new Date(transfer.ts).toISOString()}
-        className="num flex-none text-[11px] text-muted"
-      >
-        {formatRelative(new Date(transfer.ts).toISOString())}
-      </time>
+        <time
+          dateTime={new Date(transfer.ts).toISOString()}
+          className="num flex-none text-[11px] text-muted"
+        >
+          {formatRelative(new Date(transfer.ts).toISOString())}
+        </time>
+        {showReverseButton ? (
+          confirming ? (
+            <div className="flex flex-none items-center gap-2">
+              <button
+                type="button"
+                onClick={cancel}
+                disabled={pending}
+                className="rounded-md border border-border px-2 py-1 text-[11px] font-semibold text-muted transition hover:bg-surface-2 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={submit}
+                disabled={pending}
+                className="rounded-md bg-rose-600 px-2 py-1 text-[11px] font-semibold text-white transition hover:bg-rose-700 disabled:opacity-50"
+              >
+                Confirm reverse
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setConfirming(true)}
+              disabled={pending}
+              className="flex-none rounded-md border border-border px-2 py-1 text-[11px] font-semibold text-muted transition hover:border-rose-300 hover:bg-rose-50 hover:text-rose-700 disabled:opacity-50"
+              aria-label={`Reverse transfer of ${formatBDT(amountBdt)} from ${PROVIDER_LABEL[transfer.fromProvider]} to ${PROVIDER_LABEL[transfer.toProvider]}`}
+            >
+              {pending ? "Reversing…" : "Reverse"}
+            </button>
+          )
+        ) : null}
+      </div>
+
+      {confirming ? (
+        <div className="ml-5 flex flex-col gap-2 sm:flex-row sm:items-center">
+          <label
+            className="text-[10px] font-semibold uppercase tracking-wide text-muted"
+            htmlFor={`reverse-reason-${transfer.transferId}`}
+          >
+            Reason (optional)
+          </label>
+          <input
+            id={`reverse-reason-${transfer.transferId}`}
+            type="text"
+            value={reason}
+            onChange={(e) => setReason(e.target.value.slice(0, 120))}
+            maxLength={120}
+            placeholder="e.g. wrong recipient"
+            className="min-w-0 flex-1 rounded-md border border-border bg-surface px-2 py-1 text-[12px] text-ink outline-none transition focus:border-rose-400 focus:ring-2 focus:ring-rose-200"
+            autoFocus
+          />
+        </div>
+      ) : null}
     </li>
   );
 }
