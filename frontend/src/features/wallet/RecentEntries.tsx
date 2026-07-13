@@ -27,7 +27,8 @@
  * with a click handler only and lets the page own retry / jitter.
  */
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { RefObject } from "react";
 import {
   PROVIDER_LABEL,
   PROVIDER_HEX,
@@ -101,6 +102,73 @@ interface TransferRow {
 
 type AnyRow = EntryRow | TransferRow;
 
+/**
+ * Phase 11: keep the IntersectionObserver wiring isolated so it can
+ * be unit-tested without a DOM. The hook is exported *only* so the
+ * sibling test file can exercise it; production code should treat it
+ * as an implementation detail of RecentEntries.
+ *
+ * Behaviour:
+ *  - When `hasMore` is false, or `onLoadOlder` is absent, the hook
+ *    is a no-op (we never construct an observer, so there's no
+ *    memory to clean up).
+ *  - When `hasMore` flips off mid-flight, the observer is
+ *    disconnected (not just unobserved) so a late-arriving
+ *    intersection can't trigger one more stale fetch.
+ *  - rootMargin fires 400px *before* the sentinel reaches the
+ *    viewport — the next page is already in flight by the time the
+ *    user reaches the bottom.
+ *  - We deliberately do NOT call `onLoadOlder` while `loadingOlder`
+ *    is true. The page already disables the button on that prop, so
+ *    keeping the same gate here means a fast scroll-spam can't
+ *    double-fetch.
+ *  - Falls back to no-op if `IntersectionObserver` isn't on the
+ *    global (very old browsers); the explicit button is the
+ *    fallback in that case.
+ */
+export function useAutoLoadOnIntersect(
+  ref: RefObject<HTMLElement | null>,
+  hasMore: boolean | undefined,
+  loadingOlder: boolean | undefined,
+  onLoadOlder: (() => Promise<void> | void) | undefined,
+): void {
+  useEffect(() => {
+    const node = ref.current;
+    if (!node || !hasMore || !onLoadOlder) return;
+    if (typeof IntersectionObserver === "undefined") return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (shouldAutoLoad(entries, loadingOlder)) {
+          void onLoadOlder();
+        }
+      },
+      { rootMargin: "400px 0px 400px 0px", threshold: 0 },
+    );
+    observer.observe(node);
+    return () => {
+      observer.disconnect();
+    };
+  }, [ref, hasMore, loadingOlder, onLoadOlder]);
+}
+
+/**
+ * Pure predicate extracted from the IntersectionObserver callback so
+ * it can be unit-tested without a DOM. Returns true iff any entry
+ * is intersecting AND we're not already mid-fetch. Exported for
+ * tests only.
+ */
+export function shouldAutoLoad(
+  entries: ReadonlyArray<{ isIntersecting: boolean }>,
+  loadingOlder: boolean | undefined,
+): boolean {
+  if (loadingOlder) return false;
+  for (const entry of entries) {
+    if (entry.isIntersecting) return true;
+  }
+  return false;
+}
+
 export function RecentEntries({
   entries,
   transfers,
@@ -141,6 +209,14 @@ export function RecentEntries({
   }, [entries, transfers, previousByProvider, freshIds, alreadyReversedIds]);
 
   const totalCount = entries.length + (transfers?.length ?? 0);
+
+  // Phase 11: auto-load the next page when the user scrolls (or
+  // tabs) to the bottom of the list. The explicit "Load older"
+  // button stays as the no-IntersectionObserver / keyboard
+  // fallback — both paths funnel through the same onLoadOlder
+  // callback so the page's dedupe + cursor logic stays simple.
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  useAutoLoadOnIntersect(sentinelRef, hasMore, loadingOlder, onLoadOlder);
 
   return (
     <section
@@ -202,14 +278,27 @@ export function RecentEntries({
               button disables and the label switches to "Loading…".
               When the cursor is null and at least one row is shown,
               we surface an "End of history" hint so the user knows
-              they reached the bottom without an empty footer flash. */}
+              they reached the bottom without an empty footer flash.
+
+              Phase 11: the IntersectionObserver above watches the
+              sentinel div below. The visible button stays as the
+              no-IntersectionObserver / keyboard fallback so this
+              control is still reachable when JS support is partial
+              or the list is too short to scroll. The aria-live
+              region mirrors the button label so screen readers hear
+              "Loading…" once per fetch without us having to manage
+              focus manually. */}
           {hasMore && onLoadOlder ? (
             <div className="border-t border-border px-4 py-3 sm:px-5">
+              <div ref={sentinelRef} aria-hidden="true" className="h-px w-full" />
+              <p className="sr-only" aria-live="polite">
+                {loadingOlder ? "Loading older activity…" : ""}
+              </p>
               <button
                 type="button"
                 onClick={() => void onLoadOlder()}
                 disabled={loadingOlder}
-                className="w-full rounded-md border border-border px-3 py-2 text-xs font-semibold text-muted transition hover:border-ink/30 hover:bg-surface-2 hover:text-ink disabled:opacity-50"
+                className="mt-3 w-full rounded-md border border-border px-3 py-2 text-xs font-semibold text-muted transition hover:border-ink/30 hover:bg-surface-2 hover:text-ink disabled:opacity-50"
                 aria-label="Load older activity"
               >
                 {loadingOlder ? "Loading older activity…" : "Load older activity"}
