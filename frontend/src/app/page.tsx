@@ -40,6 +40,7 @@ import {
   type DailyPoint,
 } from "@/lib/sparklineSeries";
 import type { MetaSnapshot } from "@/lib/metaTypes";
+import type { Transfer } from "@/lib/domain/entities/transfer";
 
 function makeId(): string {
   // crypto.randomUUID exists in modern browsers + Node 19+; fallback
@@ -65,6 +66,7 @@ export default function HomePage() {
   const [freshIds, setFreshIds] = useState<Set<string>>(new Set());
   const [meta, setMeta] = useState<MetaSnapshot | null>(null);
   const [transferFrom, setTransferFrom] = useState<Provider | null>(null);
+  const [transfers, setTransfers] = useState<ReadonlyArray<Transfer>>([]);
 
   // Initial fetch — server is the source of truth. Both /api/entries
   // and /api/meta fire in parallel; whichever resolves first paints
@@ -73,9 +75,10 @@ export default function HomePage() {
     let cancelled = false;
     (async () => {
       try {
-        const [entriesRes, metaRes] = await Promise.all([
+        const [entriesRes, metaRes, transfersRes] = await Promise.all([
           fetch("/api/entries", { cache: "no-store" }),
           fetch("/api/meta", { cache: "no-store" }),
+          fetch("/api/transfers", { cache: "no-store" }),
         ]);
         if (!entriesRes.ok) {
           throw new Error(`GET /api/entries returned ${entriesRes.status}`);
@@ -84,9 +87,14 @@ export default function HomePage() {
         const snapshot: MetaSnapshot | null = metaRes.ok
           ? ((await metaRes.json()) as MetaSnapshot)
           : null;
+        const transfersList: ReadonlyArray<Transfer> = transfersRes.ok
+          ? (((await transfersRes.json()) as { transfers: Transfer[] })
+              .transfers ?? [])
+          : [];
         if (!cancelled) {
           dispatch({ type: "set_entries", entries });
           setMeta(snapshot);
+          setTransfers(transfersList);
           setLoading(false);
         }
       } catch (err) {
@@ -211,19 +219,36 @@ export default function HomePage() {
     }
   }, []);
 
+  const refetchTransfers = useCallback(async () => {
+    try {
+      const res = await fetch("/api/transfers", { cache: "no-store" });
+      if (!res.ok) return; // 422 on cold start is fine — keep prior list.
+      const list = ((await res.json()) as { transfers: Transfer[] }).transfers;
+      setTransfers(list ?? []);
+    } catch {
+      // Transfer refetch is best-effort — the balance log is still
+      // authoritative for the row totals. We don't surface this as a
+      // banner to avoid masking a more important balance error.
+    }
+  }, []);
+
+  const refetchAll = useCallback(async () => {
+    await Promise.all([refetchEntries(), refetchTransfers()]);
+  }, [refetchEntries, refetchTransfers]);
+
   const handlePersonaSwitched = useCallback(
     (snapshot: MetaSnapshot) => {
       setMeta(snapshot);
       setLoading(true);
-      void refetchEntries().finally(() => setLoading(false));
+      void refetchAll().finally(() => setLoading(false));
     },
-    [refetchEntries],
+    [refetchAll],
   );
 
   const handleTransferCommitted = useCallback(() => {
     setTransferFrom(null);
-    void refetchEntries();
-  }, [refetchEntries]);
+    void refetchAll();
+  }, [refetchAll]);
 
   return (
     <AppShell meta={meta} onPersonaSwitched={handlePersonaSwitched}>
@@ -272,6 +297,7 @@ export default function HomePage() {
 
             <RecentEntries
               entries={state.entries}
+              transfers={transfers}
               previousByProvider={previousByProvider}
               freshIds={freshIds}
             />

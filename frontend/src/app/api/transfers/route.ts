@@ -21,8 +21,13 @@
  * is naturally idempotent. The `Idempotency-Key` header is an opt-in
  * client correlation tag, not a server-side dedup key.
  *
- * Phase 6: routes through the v2 `TransferRepo` port via
- * `getRepositories(getDb()).transfers`. No direct SQL in this file.
+ * GET /api/transfers?limit=N
+ *   → 200 { transfers: Transfer[], personaId: string }
+ *   400 if `limit` is not a positive integer
+ *   422 if no active persona is set
+ *
+ * Phase 6: write path through v2 `TransferRepo` port.
+ * Phase 7: read path through the same port's `recent()`.
  */
 import { NextResponse } from "next/server";
 
@@ -40,6 +45,8 @@ export const runtime = "nodejs";
 
 const MAX_NOTE_LEN = 120;
 const MAX_IDEMPOTENCY_KEY_LEN = 64;
+const DEFAULT_LIMIT = 50;
+const MAX_LIMIT = 200;
 
 function isProvider(x: unknown): x is Provider {
   return typeof x === "string" && (PROVIDERS as string[]).includes(x);
@@ -157,6 +164,29 @@ function validateIdempotencyKey(
   return { ok: true };
 }
 
+function parseLimit(raw: string | null): {
+  ok: true;
+  value: number;
+} | { ok: false; status: 400; error: string } {
+  if (raw === null) return { ok: true, value: DEFAULT_LIMIT };
+  if (!/^\d+$/.test(raw)) {
+    return {
+      ok: false,
+      status: 400,
+      error: "limit must be a positive integer.",
+    };
+  }
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 1 || n > MAX_LIMIT) {
+    return {
+      ok: false,
+      status: 400,
+      error: `limit must be between 1 and ${MAX_LIMIT}.`,
+    };
+  }
+  return { ok: true, value: n };
+}
+
 export async function POST(req: Request) {
   // 1. Header check first — fail-fast on a malformed key rather than
   //    going through JSON parsing that may not even be needed.
@@ -272,6 +302,36 @@ export async function POST(req: Request) {
     // I/O error), surface as 503 so the client can back off.
     return NextResponse.json(
       { error: "Could not commit transfer. Please retry." },
+      { status: 503 },
+    );
+  }
+}
+
+export async function GET(req: Request) {
+  const url = new URL(req.url);
+  const limitCheck = parseLimit(url.searchParams.get("limit"));
+  if (!limitCheck.ok) {
+    return NextResponse.json(limitCheck, { status: 400 });
+  }
+
+  const personaId = readActivePersona();
+  if (!personaId) {
+    return NextResponse.json(
+      { error: "No active persona. Run the demo seeder first." },
+      { status: 422 },
+    );
+  }
+
+  try {
+    const { transfers } = getRepositories(getDb());
+    const list = await transfers.recent(personaId, limitCheck.value);
+    return NextResponse.json(
+      { transfers: list, personaId },
+      { status: 200 },
+    );
+  } catch {
+    return NextResponse.json(
+      { error: "Could not read transfer ledger." },
       { status: 503 },
     );
   }

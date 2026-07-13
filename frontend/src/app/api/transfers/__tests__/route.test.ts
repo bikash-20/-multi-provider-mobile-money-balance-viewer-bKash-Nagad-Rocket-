@@ -1,5 +1,5 @@
 /**
- * route.test.ts — POST /api/transfers contract tests.
+ * route.test.ts — POST + GET /api/transfers contract tests.
  *
  * The route is the v2-binding seam for the transfer ledger. The
  * SqliteTransferRepo binding tests already cover the v2 atomicity,
@@ -13,7 +13,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 
 import { closeDb, getDb } from "@/lib/db";
-import { POST } from "@/app/api/transfers/route";
+import { POST, GET } from "@/app/api/transfers/route";
 import { withTempDb } from "@/__tests__/withTempDb";
 
 const PERSONA = "persona-route-test";
@@ -317,6 +317,220 @@ describe("POST /api/transfers", () => {
           .get()) as { n: number };
         expect(t.n).toBe(1);
         expect(history.n).toBe(2);
+      });
+    });
+  });
+
+  describe("GET /api/transfers", () => {
+    function makeGetRequest(query: Record<string, string> = {}) {
+      const url = new URL("http://localhost/api/transfers");
+      for (const [k, v] of Object.entries(query)) url.searchParams.set(k, v);
+      return new Request(url.toString(), { method: "GET" });
+    }
+
+    it("returns 200 with empty transfers list when no commits yet", async () => {
+      await withTempDb(async () => {
+        seedPersona(DEFAULT_BALANCES);
+        const res = await GET(makeGetRequest());
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as {
+          transfers: unknown[];
+          personaId: string;
+        };
+        expect(body.transfers).toEqual([]);
+        expect(body.personaId).toBe(PERSONA);
+      });
+    });
+
+    it("returns the committed transfer with full ledger fields", async () => {
+      await withTempDb(async () => {
+        seedPersona(DEFAULT_BALANCES);
+        // amountBdt is in BDT at the wire layer; the route multiplies by 100
+        // before storing in `transfers.amount_bdt` (Paise). 12 BDT is well
+        // under the 50k-bkash / 10k-rocket opening balances.
+        const post = await POST(
+          makeJsonRequest({
+            from: "bkash",
+            to: "rocket",
+            amountBdt: 12,
+            note: "rent split",
+          }),
+        );
+        expect(post.status).toBe(201);
+
+        const res = await GET(makeGetRequest());
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as {
+          transfers: Array<{
+            transferId: string;
+            personaId: string;
+            fromProvider: string;
+            toProvider: string;
+            amountBdt: number;
+            fromDelta: number;
+            toDelta: number;
+            fromAfter: number;
+            fromVersion: number;
+            toAfter: number;
+            toVersion: number;
+            note: string;
+            ts: string;
+          }>;
+        };
+        expect(body.transfers).toHaveLength(1);
+        const t = body.transfers[0]!;
+        expect(t.fromProvider).toBe("bkash");
+        expect(t.toProvider).toBe("rocket");
+        // amountBdt is the Paise integer at the wire layer (12 BDT = 1200).
+        expect(t.amountBdt).toBe(1200);
+        expect(t.fromDelta).toBe(-1200);
+        expect(t.toDelta).toBe(1200);
+        // Default seed opened 50k bkash / 10k rocket; subtract / add 1200.
+        expect(t.fromAfter).toBe(50000 - 1200);
+        expect(t.toAfter).toBe(10000 + 1200);
+        // Versions advance by exactly one per leg.
+        expect(t.fromVersion).toBe(2);
+        expect(t.toVersion).toBe(2);
+        expect(t.note).toBe("rent split");
+        expect(typeof t.transferId).toBe("string");
+        expect(t.personaId).toBe(PERSONA);
+      });
+    });
+
+    it("returns transfers newest-first", async () => {
+      await withTempDb(async () => {
+        seedPersona(DEFAULT_BALANCES);
+        const a = await POST(
+          makeJsonRequest({ from: "bkash", to: "nagad", amountBdt: 1 }),
+        );
+        const aId = ((await a.json()) as { transfer: { transferId: string } })
+          .transfer.transferId;
+        // Sleep > 1ms so the ISO string differs — the route sorts by ts
+        // desc, and Date.now() has only ms resolution in the SQLite driver.
+        await new Promise((r) => setTimeout(r, 5));
+        const b = await POST(
+          makeJsonRequest({ from: "bkash", to: "rocket", amountBdt: 2 }),
+        );
+        const bId = ((await b.json()) as { transfer: { transferId: string } })
+          .transfer.transferId;
+
+        const res = await GET(makeGetRequest());
+        const body = (await res.json()) as {
+          transfers: Array<{ transferId: string }>;
+        };
+        expect(body.transfers.map((t) => t.transferId)).toEqual([bId, aId]);
+      });
+    });
+
+    it("respects ?limit=N", async () => {
+      await withTempDb(async () => {
+        seedPersona(DEFAULT_BALANCES);
+        for (let i = 0; i < 3; i++) {
+          // Sleep between posts so timestamps differ.
+          if (i > 0) await new Promise((r) => setTimeout(r, 3));
+          const res = await POST(
+            makeJsonRequest({ from: "bkash", to: "nagad", amountBdt: 1 }),
+          );
+          expect(res.status).toBe(201);
+        }
+        const res = await GET(makeGetRequest({ limit: "2" }));
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as { transfers: unknown[] };
+        expect(body.transfers).toHaveLength(2);
+      });
+    });
+
+    it("uses the default limit when ?limit is omitted", async () => {
+      await withTempDb(async () => {
+        seedPersona(DEFAULT_BALANCES);
+        // Commit a single transfer; default limit is well above this.
+        const post = await POST(
+          makeJsonRequest({ from: "bkash", to: "rocket", amountBdt: 1 }),
+        );
+        expect(post.status).toBe(201);
+        const res = await GET(makeGetRequest());
+        const body = (await res.json()) as { transfers: unknown[] };
+        expect(body.transfers).toHaveLength(1);
+      });
+    });
+
+    it.each([
+      ["non-numeric", "abc"],
+      ["zero", "0"],
+      ["negative", "-1"],
+      ["over max", "201"],
+      ["fractional", "1.5"],
+    ])("returns 400 on bad limit (%s)", async (_label, value) => {
+      await withTempDb(async () => {
+        seedPersona(DEFAULT_BALANCES);
+        const res = await GET(makeGetRequest({ limit: value }));
+        expect(res.status).toBe(400);
+        const body = (await res.json()) as { error?: string };
+        expect(typeof body.error).toBe("string");
+      });
+    });
+
+    it("returns 422 when no active persona is set", async () => {
+      await withTempDb(async () => {
+        // Seed a persona but do NOT set meta.active_persona so the
+        // route's precondition fails. This mirrors the cold-start path
+        // before the first /api/persona/switch call.
+        const db = getDb();
+        db.prepare(
+          `INSERT INTO personas
+             (id, display_name, opening_bkash, opening_nagad, opening_rocket,
+              inflow_rate, volatility)
+           VALUES (?, 'No Active', 1, 1, 1, 1.0, 0.10)`,
+        ).run(PERSONA);
+        const res = await GET(makeGetRequest());
+        expect(res.status).toBe(422);
+        const body = (await res.json()) as { error?: string };
+        expect(typeof body.error).toBe("string");
+      });
+    });
+
+    it("scopes the result to the active persona only", async () => {
+      await withTempDb(async () => {
+        seedPersona(DEFAULT_BALANCES);
+        const post = await POST(
+          makeJsonRequest({ from: "bkash", to: "rocket", amountBdt: 1 }),
+        );
+        expect(post.status).toBe(201);
+        const ownTransferId = ((await post.json()) as {
+          transfer: { transferId: string };
+        }).transfer.transferId;
+
+        // Switch active persona to a different one with no transfers.
+        getDb()
+          .prepare(
+            `INSERT INTO personas
+               (id, display_name, opening_bkash, opening_nagad, opening_rocket,
+                inflow_rate, volatility)
+             VALUES ('persona-other', 'Other', 1, 1, 1, 1.0, 0.10)`,
+          )
+          .run();
+        getDb()
+          .prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+          .run("active_persona", "persona-other");
+
+        const res = await GET(makeGetRequest());
+        const body = (await res.json()) as {
+          transfers: Array<{ transferId: string }>;
+          personaId: string;
+        };
+        expect(body.personaId).toBe("persona-other");
+        expect(body.transfers).toEqual([]);
+        // Sanity check: switching back returns the original transfer.
+        getDb()
+          .prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+          .run("active_persona", PERSONA);
+        const back = await GET(makeGetRequest());
+        const backBody = (await back.json()) as {
+          transfers: Array<{ transferId: string }>;
+        };
+        expect(backBody.transfers.map((t) => t.transferId)).toEqual([
+          ownTransferId,
+        ]);
       });
     });
   });
