@@ -6,8 +6,8 @@
  */
 import { describe, it, expect, beforeEach } from "vitest";
 
-import { closeDb } from "@/lib/db";
-import { listEntries } from "@/lib/entriesRepo";
+import { closeDb, getDb } from "@/lib/db";
+import { getRepositories } from "@/lib/infrastructure/repos";
 import { POST } from "@/app/api/persona/switch/route";
 import { withTempDb } from "@/__tests__/withTempDb";
 
@@ -79,9 +79,9 @@ describe("/api/persona/switch", () => {
       expect(body.summary.daysCovered).toBeLessThanOrEqual(30);
       expect(body.summary.totalEntries).toBeGreaterThan(0);
       // 30 days × 3 providers × ~1.2 entries/day with some spike rolls,
-      // but should be at least 60 rows (lower bound sanity check).
+      // so we expect at least 60 rows (lower bound sanity check).
       closeDb();
-      const entries = listEntries();
+      const entries = await getRepositories(getDb()).entries.listEntries();
       expect(entries.length).toBeGreaterThan(60);
     });
   });
@@ -91,13 +91,17 @@ describe("/api/persona/switch", () => {
       // First seed as freelancer with a fixed small window.
       await POST(makeJsonRequest({ persona: "freelancer", days: 30 }));
       closeDb();
-      const firstCount = listEntries().length;
+      const firstCount = (
+        await getRepositories(getDb()).entries.listEntries()
+      ).length;
 
       // Switch to student. The DB should be fully reseeded, not
       // appended to.
       await POST(makeJsonRequest({ persona: "student", days: 30 }));
       closeDb();
-      const secondCount = listEntries().length;
+      const secondCount = (
+        await getRepositories(getDb()).entries.listEntries()
+      ).length;
       // Second count reflects student persona distribution, not
       // freelancer + student concatenated.
       expect(secondCount).toBeGreaterThan(60);

@@ -18,8 +18,9 @@
 import { NextResponse } from "next/server";
 import path from "node:path";
 
+import { getDb } from "@/lib/db";
+import { getRepositories } from "@/lib/infrastructure/repos";
 import { seedDemo, PERSONAS, type PersonaName } from "@/lib/seedDemo";
-import { readMetaSnapshot } from "@/lib/metaRepo";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -81,7 +82,7 @@ export async function POST(req: Request) {
   }
 
   const summary = seedDemo(persona, dayCount, resolveDbPath());
-  const meta = readMetaSnapshot();
+  const meta = await getRepositories(getDb()).meta.readSnapshot();
 
   return NextResponse.json(
     { ok: true, summary, meta },

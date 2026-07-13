@@ -3,14 +3,21 @@
  *
  * GET   /api/entries        → 200, BalanceEntry[] sorted newest-first
  * POST  /api/entries        → 201, the persisted BalanceEntry
- *                              body: { provider: "bkash"|"nagad"|"rocket", balance: number >= 0 }
- *                              400 on invalid provider / negative / non-finite balance
+ *                              body: { provider: "bkash"|"nagad"|"rocket",
+ *                                      balance: number >= 0 }
+ *                              400 on invalid provider / negative /
+ *                              non-finite balance
  *
  * No PUT, no DELETE — the log is append-only per spec §4. Server owns
  * id and timestamp; the client never sets them.
+ *
+ * Phase 3: this route no longer imports `lib/entriesRepo.ts`. It pulls
+ * the `EntriesRepo` port through `getRepositories(getDb())` so the
+ * persistence layer is swappable end-to-end.
  */
 import { NextResponse } from "next/server";
-import { appendEntry, listEntries } from "@/lib/entriesRepo";
+import { getDb } from "@/lib/db";
+import { getRepositories } from "@/lib/infrastructure/repos";
 import { PROVIDERS, type Provider } from "@/features/wallet/types";
 
 export const dynamic = "force-dynamic";
@@ -25,7 +32,7 @@ function isFiniteNonNegativeNumber(x: unknown): x is number {
 }
 
 export async function GET() {
-  const entries = listEntries();
+  const entries = await getRepositories(getDb()).entries.listEntries();
   return NextResponse.json(entries, { status: 200 });
 }
 
@@ -57,6 +64,9 @@ export async function POST(req: Request) {
     );
   }
 
-  const entry = appendEntry(provider, balance);
+  const entry = await getRepositories(getDb()).entries.appendEntry(
+    provider,
+    balance,
+  );
   return NextResponse.json(entry, { status: 201 });
 }

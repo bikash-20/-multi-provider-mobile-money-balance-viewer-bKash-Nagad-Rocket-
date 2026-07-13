@@ -1,31 +1,36 @@
 /**
- * entriesRepo.test.ts — repository layer behaviour:
- *  - round-trips inserted rows
- *  - sorts newest-first (by timestamp, with id as a deterministic tiebreaker)
- *  - appendEntry is the only public write path
+ * SqliteEntriesRepo — v1-binding tests for the BalanceEntry log.
+ *
+ * Mirrors the contract exercised by the old `entriesRepo` facade unit tests:
+ *  - empty table → empty list
+ *  - newest-first ordering across providers
+ *  - tie-break by id (DESC) when timestamps collide
+ *  - appendEntry writes a UUID + ISO timestamp and round-trips
+ *  - appendEntry + listEntries preserve insertion order across multiple writes
  */
 import { describe, it, expect, beforeEach } from "vitest";
 
 import { closeDb, getDb } from "@/lib/db";
-import { appendEntry, listEntries } from "@/lib/entriesRepo";
+import { SqliteEntriesRepo } from "@/lib/infrastructure/repos/sqliteEntriesRepo";
 import { withTempDb } from "@/__tests__/withTempDb";
 
-describe("entriesRepo", () => {
+describe("SqliteEntriesRepo", () => {
   beforeEach(() => {
     closeDb();
   });
 
   it("returns an empty list when the table is empty", async () => {
-    await withTempDb(() => {
-      expect(listEntries()).toEqual([]);
+    await withTempDb(async () => {
+      const repo = new SqliteEntriesRepo(getDb());
+      expect(await repo.listEntries()).toEqual([]);
     });
   });
 
   it("returns entries newest-first across providers", async () => {
-    await withTempDb(() => {
+    await withTempDb(async () => {
       const db = getDb();
-      // Bypass appendEntry to control timestamps exactly; this is the
-      // same shape a real import path would use.
+      // Bypass appendEntry to control timestamps exactly; same shape as a
+      // real import path.
       const insert = db.prepare(
         "INSERT INTO balance_entries (id, provider, balance, timestamp) VALUES (?, ?, ?, ?)",
       );
@@ -33,14 +38,15 @@ describe("entriesRepo", () => {
       insert.run("b", "rocket", 200, "2025-01-02T00:00:00.000Z");
       insert.run("c", "nagad", 300, "2025-01-03T00:00:00.000Z");
 
-      const result = listEntries();
+      const repo = new SqliteEntriesRepo(db);
+      const result = await repo.listEntries();
       expect(result.map((e) => e.provider)).toEqual(["nagad", "rocket", "bkash"]);
       expect(result.map((e) => e.balance)).toEqual([300, 200, 100]);
     });
   });
 
   it("breaks timestamp ties deterministically by id (DESC)", async () => {
-    await withTempDb(() => {
+    await withTempDb(async () => {
       const db = getDb();
       const insert = db.prepare(
         "INSERT INTO balance_entries (id, provider, balance, timestamp) VALUES (?, ?, ?, ?)",
@@ -50,15 +56,19 @@ describe("entriesRepo", () => {
       insert.run("second", "bkash", 11, ts);
       insert.run("third", "bkash", 12, ts);
 
-      const result = listEntries();
+      const repo = new SqliteEntriesRepo(db);
+      const result = await repo.listEntries();
       expect(result.map((e) => e.id)).toEqual(["third", "second", "first"]);
     });
   });
 
   it("appendEntry assigns a UUID + ISO timestamp and persists all fields", async () => {
-    await withTempDb(() => {
+    await withTempDb(async () => {
+      const db = getDb();
+      const repo = new SqliteEntriesRepo(db);
+
       const before = new Date().toISOString();
-      const entry = appendEntry("bkash", 250);
+      const entry = await repo.appendEntry("bkash", 250);
       const after = new Date().toISOString();
 
       // Shape: {id, provider, balance, timestamp}
@@ -76,7 +86,7 @@ describe("entriesRepo", () => {
       expect(entry.timestamp <= after).toBe(true);
 
       // Round-trip via the DB row.
-      const row = getDb()
+      const row = db
         .prepare(
           "SELECT id, provider, balance, timestamp FROM balance_entries WHERE id = ?",
         )
@@ -94,16 +104,18 @@ describe("entriesRepo", () => {
 
   it("appendEntry + listEntries round-trip preserves order", async () => {
     await withTempDb(async () => {
-      appendEntry("bkash", 100);
-      // Sleep one ms so subsequent entries have strictly greater
-      // timestamps; better-sqlite3 timestamps are millisecond-precision
-      // strings and can collide on very fast machines.
-      await new Promise((r) => setTimeout(r, 2));
-      const a = appendEntry("nagad", 200);
-      await new Promise((r) => setTimeout(r, 2));
-      const b = appendEntry("rocket", 300);
+      const repo = new SqliteEntriesRepo(getDb());
 
-      const all = listEntries();
+      await repo.appendEntry("bkash", 100);
+      // Sleep one ms so subsequent entries have strictly greater timestamps;
+      // better-sqlite3 timestamps are millisecond-precision strings and can
+      // collide on very fast machines.
+      await new Promise((r) => setTimeout(r, 2));
+      const a = await repo.appendEntry("nagad", 200);
+      await new Promise((r) => setTimeout(r, 2));
+      const b = await repo.appendEntry("rocket", 300);
+
+      const all = await repo.listEntries();
       expect(all[0]?.id).toBe(b.id);
       expect(all[1]?.id).toBe(a.id);
     });

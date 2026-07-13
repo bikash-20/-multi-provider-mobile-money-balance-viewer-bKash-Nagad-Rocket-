@@ -1,25 +1,26 @@
 /**
  * /api/meta route — exposes the demo metadata row.
+ *
+ * Phase 3: the test no longer pokes the meta facade; it just opens the
+ * same SQLite connection the route uses (`getDb()`) and writes the seed
+ * rows directly. The v1 `ensureMetaTable()` call was a pre-condition
+ * for the inline-CREATE-table schema in `lib/db.ts`; with the meta
+ * schema already managed by the inline `initSchema()` in `db.ts`, the
+ * test just writes rows.
  */
 import { describe, it, expect, beforeEach } from "vitest";
+import type { Database as DB } from "better-sqlite3";
 
-import { closeDb } from "@/lib/db";
+import { closeDb, getDb } from "@/lib/db";
 import { GET } from "@/app/api/meta/route";
 import { withTempDb } from "@/__tests__/withTempDb";
-import { ensureMetaTable } from "@/lib/metaRepo";
 
 function writeMeta(rows: Record<string, string>): void {
-  const dbPath = process.env.WALLETSYNC_DB_PATH;
-  if (!dbPath) throw new Error("WALLETSYNC_DB_PATH not set");
-  const Database = require("better-sqlite3") as typeof import("better-sqlite3");
-  ensureMetaTable();
-  const db = new Database(dbPath);
-  try {
-    const ins = db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
-    for (const [k, v] of Object.entries(rows)) ins.run(k, v);
-  } finally {
-    db.close();
-  }
+  const db: DB = getDb();
+  const ins = db.prepare(
+    "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+  );
+  for (const [k, v] of Object.entries(rows)) ins.run(k, v);
 }
 
 describe("/api/meta", () => {
