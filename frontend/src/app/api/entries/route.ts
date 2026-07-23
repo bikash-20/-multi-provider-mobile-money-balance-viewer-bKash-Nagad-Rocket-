@@ -25,6 +25,7 @@ import { NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
 import { getRepositories } from "@/lib/infrastructure/repos";
 import { PROVIDERS, type Provider } from "@/features/wallet/types";
+import { isCurrency, type Currency } from "@/features/currency/types";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -169,7 +170,11 @@ export async function POST(req: Request) {
   if (typeof body !== "object" || body === null) {
     return NextResponse.json({ error: "Body must be an object." }, { status: 400 });
   }
-  const { provider, balance } = body as { provider?: unknown; balance?: unknown };
+  const { provider, balance, currency } = body as {
+    provider?: unknown;
+    balance?: unknown;
+    currency?: unknown;
+  };
   if (!isProvider(provider)) {
     return NextResponse.json(
       { error: `provider must be one of: ${PROVIDERS.join(", ")}.` },
@@ -183,9 +188,25 @@ export async function POST(req: Request) {
     );
   }
 
+  // Optional currency field (defaults to BDT).
+  const entryCurrency: Currency =
+    currency !== undefined && isCurrency(currency) ? currency : "BDT";
+
+  // For USD entries, accept an optional exchange rate. If not provided,
+  // the server will try to fetch the live rate; if that fails, we use
+  // the fallback rate (~110 BDT/USD).
+  const exchangeRateBdt =
+    body && typeof body === "object" && "exchangeRateBdt" in body
+      ? (body as Record<string, unknown>).exchangeRateBdt
+      : undefined;
+
   const entry = await getRepositories(getDb()).entries.appendEntry(
     provider,
     balance,
+    entryCurrency,
+    typeof exchangeRateBdt === "number" && Number.isFinite(exchangeRateBdt)
+      ? exchangeRateBdt
+      : undefined,
   );
   return NextResponse.json(entry, { status: 201 });
 }

@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Inter, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
+import { ThemeProvider } from "@/features/shell/ThemeProvider";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -20,6 +21,17 @@ export const metadata: Metadata = {
   applicationName: "WalletSync",
   description:
     "Manually tracked balances for bKash, Nagad, and Rocket. Read-only personal view, no provider API calls.",
+  manifest: "/manifest.json",
+  appleWebApp: {
+    capable: true,
+    title: "WalletSync",
+    statusBarStyle: "default",
+  },
+  other: {
+    "apple-mobile-web-app-capable": "yes",
+    "mobile-web-app-capable": "yes",
+    "apple-touch-fullscreen": "yes",
+  },
 };
 
 /*
@@ -73,9 +85,10 @@ export default function RootLayout({
     <html lang="en" className={`${inter.variable} ${plexMono.variable}`} suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: THEME_BOOT }} />
+        <link rel="apple-touch-icon" href="/icons/icon-192.svg" />
       </head>
       <body className="min-h-screen bg-base font-sans text-ink antialiased">
-        {children}
+        <ThemeProvider>{children}</ThemeProvider>
       </body>
     </html>
   );

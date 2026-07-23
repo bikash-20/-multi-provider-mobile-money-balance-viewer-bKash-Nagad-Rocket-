@@ -48,6 +48,66 @@
   --selection-color: #0B0F14;
 }
 
+/* ─── Smooth theme transitions ─────────────────────────────────────
+   Color-driven properties transition when the `dark` class is toggled
+   on <html>. The transition is short (200ms) with ease-out timing for
+   a natural deceleration.
+
+   Properties that transition:
+    - background, background-color, color, border-color
+    - fill, stroke (for inline SVG icons and chart elements)
+    - opacity (for any theme-driven fade)
+
+   Properties that do NOT transition:
+    - box-shadow (expensive GPU-composited work, often looks muddy)
+    - border-radius, layout properties, transform
+    - scroll-behavior
+
+   The universal selector is intentional here — every theme-driven
+   element on the dashboard benefits from the transition, and the
+   property list is deliberately limited to color-related properties
+   to keep the style recalculation cheap for <500 DOM nodes.
+
+   Opt-out: add class `.no-theme-transition` to any element that
+   manages its own transitions (e.g. interactive hover effects).
+*/
+:root {
+  --theme-transition-duration: 200ms;
+  --theme-transition-timing: ease-out;
+}
+
+*,
+*::before,
+*::after {
+  transition:
+    background var(--theme-transition-duration) var(--theme-transition-timing),
+    background-color var(--theme-transition-duration) var(--theme-transition-timing),
+    color var(--theme-transition-duration) var(--theme-transition-timing),
+    border-color var(--theme-transition-duration) var(--theme-transition-timing),
+    fill var(--theme-transition-duration) var(--theme-transition-timing),
+    stroke var(--theme-transition-duration) var(--theme-transition-timing),
+    opacity var(--theme-transition-duration) var(--theme-transition-timing);
+}
+
+/* Opt-out: elements that need their own transitions (hover effects,
+   focus rings, etc.) can skip the theme transition via this class.
+   Specificity is high enough to override the universal `*` rule
+   without !important, so component transitions are preserved. */
+.no-theme-transition,
+.no-theme-transition *,
+.no-theme-transition *::before,
+.no-theme-transition *::after {
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+  }
+}
+
 html, body {
   font-family: var(--font-inter), ui-sans-serif, system-ui, -apple-system, "Noto Sans Bengali",
                "Hind Siliguri", "Segoe UI", Roboto, sans-serif;
@@ -176,4 +236,70 @@ body {
 }
 @media (prefers-reduced-motion: reduce) {
   .log-row-enter { animation: none; }
+}
+
+/* ─── Print styles (Export / Save as PDF) ───────────────────────
+   Hides navigation, buttons, and interactive elements. Expands
+   all collapsible content. Shows data in a clean, monochrome
+   format suitable for PDF generation via Ctrl+P / Cmd+P. */
+@media print {
+  @page {
+    margin: 1.5cm;
+    size: A4 portrait;
+  }
+
+  body {
+    background: white !important;
+    color: #0f172a !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* Hide interactive elements */
+  header,
+  nav,
+  button:not([aria-label="Total balance"]),
+  .sparkline,
+  .skeleton-shimmer {
+    display: none !important;
+  }
+
+  /* Keep the main content */
+  main {
+    max-width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  /* Expand all collapsible sections */
+  [aria-expanded] {
+    pointer-events: none;
+  }
+
+  /* Remove shadows, show borders clearly */
+  * {
+    box-shadow: none !important;
+    text-shadow: none !important;
+  }
+
+  /* Ensure all cards have visible borders */
+  .border-border {
+    border-color: #cbd5e1 !important;
+  }
+
+  /* Force expanded state for collapsed panels */
+  [aria-expanded="false"] + div {
+    display: block !important;
+  }
+
+  /* Currency text stands out */
+  .num, .hero-total {
+    color: #0f172a !important;
+  }
+
+  /* Add page breaks between major sections */
+  section {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
 }

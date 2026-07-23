@@ -33,14 +33,17 @@ import {
   grandTotal,
   lastUpdatedAt,
   latestFor,
+  hasForeignCurrency,
 } from "@/features/wallet/selectors";
 import { PROVIDERS, type BalanceEntry, type Provider } from "@/features/wallet/types";
+import type { Currency } from "@/features/currency/types";
 import {
   buildDailySeries,
   type DailyPoint,
 } from "@/lib/sparklineSeries";
 import type { MetaSnapshot } from "@/lib/metaTypes";
 import type { Transfer } from "@/lib/domain/entities/transfer";
+import { OfflineIndicator, PWARegister, enqueue } from "@/features/pwa";
 
 function makeId(): string {
   // crypto.randomUUID exists in modern browsers + Node 19+; fallback
@@ -94,6 +97,27 @@ export default function HomePage() {
   // Surfaced to the user when a reverse fails — distinct from the
   // balance-error banner so a stale row doesn't drown the latest one.
   const [reverseError, setReverseError] = useState<string | null>(null);
+  // Multi-currency: exchange rate state for USD entries.
+  const [usdRate, setUsdRate] = useState<number>(110);
+
+  // Fetch forex rate on mount (with a 5s timeout — non-blocking).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/forex", {
+          signal: AbortSignal.timeout(5_000),
+        });
+        if (!cancelled && res.ok) {
+          const data = (await res.json()) as { rate: number };
+          setUsdRate(data.rate);
+        }
+      } catch {
+        // Fallback rate is fine — don't block the UI.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   // Initial fetch — server is the source of truth. Both /api/entries
   // and /api/meta fire in parallel; whichever resolves first paints
@@ -153,6 +177,7 @@ export default function HomePage() {
 
   const total = grandTotal(state);
   const updatedAt = lastUpdatedAt(state);
+  const includesForeignCurrency = hasForeignCurrency(state);
 
   // previousByProvider: for the most recent entry of each provider,
   // find the entry that came immediately before it. Powers the
@@ -178,8 +203,30 @@ export default function HomePage() {
     return map;
   }, [state.entries]);
 
+  // Consolidate the latest entry's currency info for each provider.
+  const latestEntries = useMemo(() => {
+    const result: Record<
+      Provider,
+      { balance: number; currency: Currency; bdtEquivalent?: number }
+    > = { bkash: { balance: 0, currency: "BDT" }, nagad: { balance: 0, currency: "BDT" }, rocket: { balance: 0, currency: "BDT" } };
+    for (const p of PROVIDERS) {
+      const latest = latestFor(state, p);
+      if (latest) {
+        result[p] = {
+          balance: latest.balance,
+          currency: latest.currency ?? "BDT",
+          bdtEquivalent:
+            latest.currency === "USD" && latest.exchangeRateBdt
+              ? latest.balance * latest.exchangeRateBdt
+              : undefined,
+        };
+      }
+    }
+    return result;
+  }, [state]);
+
   const handleUpdate = useCallback(
-    async (provider: Provider, newBalance: number) => {
+    async (provider: Provider, newBalance: number, currency: Currency = "BDT") => {
       const id = makeId();
       const timestamp = new Date().toISOString();
       // 1) Optimistic: append locally so the UI feels instant.
@@ -189,6 +236,8 @@ export default function HomePage() {
         balance: newBalance,
         timestamp,
         id,
+        currency,
+        exchangeRateBdt: currency === "USD" ? usdRate : null,
       });
       // Mark this id as freshly-added so the row plays its slide-in
       // animation. Clear after a tick so subsequent re-renders don't
@@ -209,24 +258,54 @@ export default function HomePage() {
       setPending((p) => ({ ...p, [provider]: { id, provider } }));
       setError(null);
 
+      // Build the POST body with currency info.
+      const body: Record<string, unknown> = { provider, balance: newBalance };
+      if (currency === "USD") {
+        body.currency = "USD";
+        body.exchangeRateBdt = usdRate;
+      }
+
       // 2) Persist to the server.
       try {
         const res = await fetch("/api/entries", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ provider, balance: newBalance }),
+          body: JSON.stringify(body),
         });
         if (!res.ok) {
           const body = (await res.json().catch(() => ({}))) as { error?: string };
           throw new Error(body.error ?? `POST /api/entries returned ${res.status}`);
         }
       } catch (err) {
-        // 3) Rollback the optimistic row and surface the error.
+        // 3) Offline support: if we're not connected, queue the mutation
+        //    instead of rolling back. The optimistic entry stays visible.
+        if (
+          !navigator.onLine ||
+          err instanceof TypeError ||
+          (err instanceof Error && err.message === 'Failed to fetch')
+        ) {
+          await enqueue({
+            method: 'POST',
+            url: '/api/entries',
+            body: JSON.stringify(body),
+            optimisticId: id,
+            label: `Update ${provider} balance`,
+          });
+          // Keep the optimistic update — no rollback, no error banner.
+          setPending((p) => {
+            const next = { ...p };
+            delete next[provider];
+            return next;
+          });
+          return;
+        }
+        // 4) Rollback the optimistic row and surface the error for
+        //    non-network failures (4xx, 5xx, validation errors).
         dispatch({ type: "remove_entry", id });
         setError(
           err instanceof Error
-            ? `Saved locally but couldn't reach the server: ${err.message}`
-            : "Saved locally but couldn't reach the server.",
+            ? `Couldn't save: ${err.message}`
+            : "Couldn't save.",
         );
       } finally {
         setPending((p) => {
@@ -236,7 +315,7 @@ export default function HomePage() {
         });
       }
     },
-    [],
+    [usdRate],
   );
 
   // After a persona switch, refetch entries (the server just wiped +
@@ -363,6 +442,12 @@ export default function HomePage() {
     await Promise.all([refetchEntries(), refetchTransfers()]);
   }, [refetchEntries, refetchTransfers]);
 
+  // PWA: trigger a data refetch after an offline-sync replay completes.
+  // Must be defined AFTER refetchAll (no hoisting for const).
+  const handleSyncComplete = useCallback(() => {
+    void refetchAll();
+  }, [refetchAll]);
+
   const handlePersonaSwitched = useCallback(
     (snapshot: MetaSnapshot) => {
       setMeta(snapshot);
@@ -422,6 +507,28 @@ export default function HomePage() {
         // the inverse leg.
         await refetchAll();
       } catch (err) {
+        // Offline support: queue the reverse for later instead of
+        // showing an error.
+        if (
+          !navigator.onLine ||
+          err instanceof TypeError ||
+          (err instanceof Error && err.message === 'Failed to fetch')
+        ) {
+          await enqueue({
+            method: 'POST',
+            url: `/api/transfers/${encodeURIComponent(transferId)}/reverse`,
+            body: JSON.stringify({ reason }),
+            optimisticId: transferId,
+            label: `Reverse transfer ${transferId.slice(0, 8)}…`,
+          });
+          setReversingIds((prev) => {
+            if (!prev.has(transferId)) return prev;
+            const next = new Set(prev);
+            next.delete(transferId);
+            return next;
+          });
+          return;
+        }
         // 4xx / 5xx / network — surface inline without rolling back
         // anything (no optimistic insert happened client-side; the
         // server never saw a request, or it rejected it).
@@ -443,8 +550,11 @@ export default function HomePage() {
   );
 
   return (
-    <AppShell meta={meta} onPersonaSwitched={handlePersonaSwitched}>
+    <>
+      <PWARegister />
+      <AppShell meta={meta} onPersonaSwitched={handlePersonaSwitched}>
       <div className="flex flex-col gap-4 sm:gap-5">
+        <OfflineIndicator onSynced={handleSyncComplete} />
         {loading ? (
           <>
             <Skeleton className="h-[120px] sm:h-[140px]" label="Loading total balance" />
@@ -457,7 +567,11 @@ export default function HomePage() {
           </>
         ) : (
           <>
-            <TotalBalanceHeader total={total} lastUpdatedAt={updatedAt} />
+            <TotalBalanceHeader
+              total={total}
+              lastUpdatedAt={updatedAt}
+              includesForeignCurrency={includesForeignCurrency}
+            />
 
             {error && (
               <div
@@ -479,16 +593,18 @@ export default function HomePage() {
 
             <div className="flex flex-col gap-3 sm:gap-4">
               {PROVIDERS.map((p) => {
-                const latest = latestFor(state, p);
+                const info = latestEntries[p];
                 return (
                   <ProviderBalanceCard
                     key={p}
                     provider={p}
-                    balance={latest?.balance}
-                    lastUpdated={latest?.timestamp}
+                    balance={info.balance}
+                    currency={info.currency}
+                    bdtEquivalent={info.bdtEquivalent}
+                    lastUpdated={latestFor(state, p)?.timestamp}
                     disabled={false}
                     pending={Boolean(pending[p])}
-                    onUpdate={(newBalance) => handleUpdate(p, newBalance)}
+                    onUpdate={(newBalance, currency) => handleUpdate(p, newBalance, currency)}
                     onTransfer={() => setTransferFrom(p)}
                     series={seriesByProvider[p]}
                   />
@@ -533,5 +649,6 @@ export default function HomePage() {
         />
       )}
     </AppShell>
+    </>
   );
 }

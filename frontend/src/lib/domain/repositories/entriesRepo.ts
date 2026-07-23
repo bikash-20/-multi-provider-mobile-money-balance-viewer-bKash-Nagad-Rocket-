@@ -14,6 +14,7 @@
  * `BalanceRepo` adapter.
  */
 import type { BalanceEntry, Provider } from "@/features/wallet/types";
+import type { Currency } from "@/features/currency/types";
 
 /**
  * Keyset cursor for paging back through the entries log. `id` is the
@@ -52,9 +53,15 @@ export interface EntriesRepo {
   }): Promise<BalanceEntry[]>;
 
   /**
-   * Append a single row. Server assigns `id` (UUIDv4) and `timestamp`
-   * (ISO 8601) so the client cannot lie about either. Returns the
+   * Append a single row. Server assigns `id` and `timestamp` (ISO 8601).
+   * Optional `currency` (defaults to 'BDT') and `exchangeRateBdt` (used
+   * only for USD entries) for multi-currency support. Returns the
    * persisted row, including the assigned id and timestamp.
    */
-  appendEntry(provider: Provider, balance: number): Promise<BalanceEntry>;
+  appendEntry(
+    provider: Provider,
+    balance: number,
+    currency?: Currency,
+    exchangeRateBdt?: number,
+  ): Promise<BalanceEntry>;
 }

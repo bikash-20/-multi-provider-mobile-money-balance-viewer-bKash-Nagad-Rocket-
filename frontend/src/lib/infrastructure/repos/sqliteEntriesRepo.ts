@@ -29,6 +29,7 @@ import type {
   BalanceEntry,
   Provider,
 } from "@/features/wallet/types";
+import type { Currency } from "@/features/currency/types";
 
 /** Marker for optimistic-lock conflicts inside v2 writes. Phase 5
  *  retry hook re-throws this so the jittered retry loop can pick it
@@ -65,6 +66,8 @@ interface V2Row {
   source: string;
   transfer_id: string | null;
   ts: number;
+  currency: string | null;
+  exchange_rate: number | null;
 }
 
 const DEFAULT_PERSONA = "student";
@@ -121,14 +124,19 @@ function ensurePersona(db: DB, personaId: string): void {
 }
 
 function hydrate(row: V2Row): BalanceEntry {
-  return Object.freeze({
-    // Stringify the autoincrement id so the v1 UI contract (id: string)
-    // holds. UI never parses it as a number; it just uses it as a key.
+  const entry: BalanceEntry = {
     id: String(row.id),
     provider: row.provider_id,
     balance: row.balance,
     timestamp: new Date(row.ts).toISOString(),
-  });
+  };
+  if (row.currency && row.currency !== "BDT") {
+    entry.currency = row.currency as Currency;
+    if (row.exchange_rate != null) {
+      entry.exchangeRateBdt = row.exchange_rate;
+    }
+  }
+  return Object.freeze(entry);
 }
 
 export class SqliteEntriesRepo implements EntriesRepo {
@@ -151,7 +159,8 @@ export class SqliteEntriesRepo implements EntriesRepo {
     const rows = before
       ? this.db
           .prepare<[string, number, number, number], V2Row>(
-            `SELECT id, persona_id, provider_id, balance, source, transfer_id, ts
+            `SELECT id, persona_id, provider_id, balance, source, transfer_id,
+                    ts, currency, exchange_rate
              FROM balance_entries
              WHERE persona_id = ?
                AND (ts, id) < (?, ?)
@@ -166,7 +175,8 @@ export class SqliteEntriesRepo implements EntriesRepo {
           )
       : this.db
           .prepare<[string, number], V2Row>(
-            `SELECT id, persona_id, provider_id, balance, source, transfer_id, ts
+            `SELECT id, persona_id, provider_id, balance, source, transfer_id,
+                    ts, currency, exchange_rate
              FROM balance_entries
              WHERE persona_id = ?
              ORDER BY ts DESC, id DESC
@@ -176,7 +186,12 @@ export class SqliteEntriesRepo implements EntriesRepo {
     return Promise.resolve(rows.map(hydrate));
   }
 
-  appendEntry(provider: Provider, balance: number): Promise<BalanceEntry> {
+  appendEntry(
+    provider: Provider,
+    balance: number,
+    currency?: Currency,
+    exchangeRateBdt?: number,
+  ): Promise<BalanceEntry> {
     // Cold-start append: lazily create the default persona + balances.
     // This must run before the retry loop because the persona + the
     // initial provider_balance rows need to exist before any optimistic
@@ -250,10 +265,18 @@ export class SqliteEntriesRepo implements EntriesRepo {
           const ins = db
             .prepare(
               `INSERT INTO balance_entries
-                 (persona_id, provider_id, balance, source, transfer_id, ts)
-               VALUES (?, ?, ?, 'manual', NULL, ?)`,
+                 (persona_id, provider_id, balance, source, transfer_id,
+                  ts, currency, exchange_rate)
+               VALUES (?, ?, ?, 'manual', NULL, ?, ?, ?)`,
             )
-            .run(pid, provider, balance, ts);
+            .run(
+              pid,
+              provider,
+              balance,
+              ts,
+              currency ?? "BDT",
+              currency === "USD" && exchangeRateBdt != null ? exchangeRateBdt : null,
+            );
           return hydrate({
             id: Number(ins.lastInsertRowid),
             persona_id: pid,
@@ -262,6 +285,11 @@ export class SqliteEntriesRepo implements EntriesRepo {
             source: "manual",
             transfer_id: null,
             ts,
+            currency: currency ?? "BDT",
+            exchange_rate:
+              currency === "USD" && exchangeRateBdt != null
+                ? exchangeRateBdt
+                : null,
           });
         });
       },

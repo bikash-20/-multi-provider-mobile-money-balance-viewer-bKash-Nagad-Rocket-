@@ -8,6 +8,7 @@
  */
 
 import type { AppState, BalanceEntry, Provider } from "./types";
+import type { Currency } from "@/features/currency/types";
 
 export function latestFor(
   state: AppState,
@@ -16,26 +17,66 @@ export function latestFor(
   return state.entries.find((e) => e.provider === provider);
 }
 
-/** Map of provider → current balance (the latest entry's balance for
- *  that provider, or 0 if no entries yet). */
-export function currentBalances(state: AppState): Record<Provider, number> {
-  const out = { bkash: 0, nagad: 0, rocket: 0 } as Record<Provider, number>;
-  // Walk newest → oldest; first time we see a provider, record its balance
-  // and skip further entries for it. This is O(n) and tolerates any
-  // ordering of state.entries.
+/** Map of provider -> current balance (the latest entry's balance for
+ *  that provider, or 0 if no entries yet). Returns the balance IN THE
+ *  ENTRY'S CURRENCY — the caller must convert for totals. */
+export function currentBalances(
+  state: AppState,
+): Record<Provider, { balance: number; currency: Currency }> {
+  const out = {
+    bkash: { balance: 0, currency: "BDT" as Currency },
+    nagad: { balance: 0, currency: "BDT" as Currency },
+    rocket: { balance: 0, currency: "BDT" as Currency },
+  };
   for (const e of state.entries) {
-    // Latest-for-provider will be the first match in the newest-first list.
-    if (e === latestFor(state, e.provider)) {
-      out[e.provider] = e.balance;
+    if (Object.prototype.hasOwnProperty.call(out, e.provider)) {
+      const cell = out[e.provider];
+      if (e === latestFor(state, e.provider)) {
+        cell.balance = e.balance;
+        cell.currency = e.currency ?? "BDT";
+      }
     }
   }
   return out;
 }
 
-/** Sum of all current balances across providers. */
+/**
+ * Sum of all current balances across providers, converted to BDT.
+ *
+ * USD entries are converted using their stored exchangeRateBdt. If
+ * the rate is missing (shouldn't happen for well-formed data), we
+ * skip the entry (count as 0) so a stale rate doesn't silently hide
+ * a USD amount.
+ */
 export function grandTotal(state: AppState): number {
   const cb = currentBalances(state);
-  return cb.bkash + cb.nagad + cb.rocket;
+  let total = 0;
+  for (const provider of ["bkash", "nagad", "rocket"] as const) {
+    const cell = cb[provider];
+    if (cell.currency === "USD") {
+      // Find the entry to get the exchange rate.
+      const entry = latestFor(state, provider);
+      const rate = entry?.exchangeRateBdt;
+      if (rate && Number.isFinite(rate) && rate > 0) {
+        total += cell.balance * rate;
+      }
+      // If no rate, skip (can't convert).
+    } else {
+      total += cell.balance;
+    }
+  }
+  return total;
+}
+
+/**
+ * Check if any provider has a non-BDT balance — used to show the
+ * "Includes converted amounts" note on the Total header.
+ */
+export function hasForeignCurrency(state: AppState): boolean {
+  for (const e of state.entries) {
+    if (e.currency && e.currency !== "BDT") return true;
+  }
+  return false;
 }
 
 /** Most recent timestamp across all entries — used for the

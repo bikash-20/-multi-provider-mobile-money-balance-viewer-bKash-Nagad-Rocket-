@@ -9,11 +9,12 @@
  *    numeric input, pre-filled with the current value (or empty if none).
  *  - Confirm (checkmark or Enter) calls onUpdate and exits edit mode.
  *  - Cancel (X or Escape) reverts to display state with no mutation.
- *  - Negative numbers and non-numeric input are rejected inline; the
- *    submit affordance is disabled until the value parses to a
- *    non-negative finite number.
- *  - `disabled` disables the "Update balance" trigger (used during the
- *    initial fetch). `pending` visually marks an in-flight POST.
+ *  - Negative numbers and non-numeric input are rejected inline.
+ *
+ * Multi-currency additions:
+ *  - Shows "USD" badge for USD entries
+ *  - Shows BDT equivalent (≈ ৳11,000) below USD entries
+ *  - Edit mode includes BDT/USD toggle
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -24,21 +25,24 @@ import {
   type Provider,
 } from "./types";
 import { formatBDT, formatRelative } from "@/lib/time";
+import { formatUsd, formatBdtEquivalent } from "@/lib/domain/forex";
 import { Sparkline } from "./Sparkline";
 import { DeltaPctBadge } from "./DeltaPctBadge";
 import { useCountUp } from "./useCountUp";
 import type { DailyPoint } from "@/lib/sparklineSeries";
+import type { Currency } from "@/features/currency/types";
 
 interface ProviderBalanceCardProps {
   provider: Provider;
   balance?: number;
+  currency?: Currency;
+  /** BDT equivalent of the balance (for USD entries). */
+  bdtEquivalent?: number;
   lastUpdated?: string;
-  onUpdate: (newBalance: number) => void;
+  onUpdate: (newBalance: number, currency: Currency) => void;
   onTransfer?: () => void;
   disabled?: boolean;
   pending?: boolean;
-  /** Last `windowDays` of points for this provider. Optional — the
-   *  card stays useful without a sparkline. */
   series?: ReadonlyArray<DailyPoint>;
 }
 
@@ -62,6 +66,8 @@ const ERROR_COPY: Record<Exclude<ValidationError, null>, string> = {
 export function ProviderBalanceCard({
   provider,
   balance,
+  currency: entryCurrency = "BDT",
+  bdtEquivalent,
   lastUpdated,
   onUpdate,
   onTransfer,
@@ -71,9 +77,9 @@ export function ProviderBalanceCard({
 }: ProviderBalanceCardProps) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<string>(balance?.toString() ?? "");
+  const [selectedCurrency, setSelectedCurrency] = useState<Currency>(entryCurrency);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Focus + select on entry so the user can type to overwrite.
   useEffect(() => {
     if (editing && inputRef.current) {
       inputRef.current.focus();
@@ -82,16 +88,13 @@ export function ProviderBalanceCard({
   }, [editing]);
 
   const { value, error } = validate(draft);
-
-  // Animated display value. Snap to the live `balance` while editing or
-  // when balance is undefined (no card yet) so the empty-state copy
-  // stays the same.
   const displayBalance = useCountUp(balance ?? 0);
   const canSubmit = value !== null && error === null;
 
   function startEdit() {
     if (disabled) return;
     setDraft(balance?.toString() ?? "");
+    setSelectedCurrency(entryCurrency);
     setEditing(true);
   }
 
@@ -102,7 +105,7 @@ export function ProviderBalanceCard({
 
   function confirm() {
     if (value === null) return;
-    onUpdate(value);
+    onUpdate(value, selectedCurrency);
     setEditing(false);
   }
 
@@ -116,12 +119,13 @@ export function ProviderBalanceCard({
     }
   }
 
+  const symbol = selectedCurrency === "USD" ? "$" : "৳";
+
   return (
     <section
       aria-label={`${PROVIDER_LABEL[provider]} balance`}
       className="relative overflow-hidden rounded-2xl border border-border bg-surface shadow-card"
     >
-      {/* 2px top hairline — keeps provider identity visible across themes. */}
       <div
         className={`h-0.5 w-full ${PROVIDER_HAIRLINE_CLASS[provider]}`}
         aria-hidden
@@ -136,6 +140,11 @@ export function ProviderBalanceCard({
               aria-hidden
             />
             <span className="eyebrow">{PROVIDER_LABEL[provider]}</span>
+            {entryCurrency === "USD" && !editing && (
+              <span className="rounded-md border border-signal/30 bg-signal-soft/50 px-1.5 py-0.5 text-[10px] font-semibold text-signal">
+                USD
+              </span>
+            )}
             {pending && (
               <span
                 aria-hidden
@@ -174,7 +183,7 @@ export function ProviderBalanceCard({
           {editing ? (
             <div>
               <div className="flex items-baseline gap-2">
-                <span className="num text-2xl text-muted">৳</span>
+                <span className="num text-2xl text-muted">{symbol}</span>
                 <input
                   ref={inputRef}
                   type="text"
@@ -182,19 +191,19 @@ export function ProviderBalanceCard({
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
                   onKeyDown={onKeyDown}
-                  aria-label={`New ${PROVIDER_LABEL[provider]} balance in BDT`}
+                  aria-label={`New ${PROVIDER_LABEL[provider]} balance in ${selectedCurrency}`}
                   aria-invalid={error !== null}
                   aria-describedby={`${provider}-err`}
                   className="num w-full bg-transparent text-3xl font-semibold text-ink outline-none placeholder:text-muted"
                   placeholder="0.00"
                 />
+                <CurrencyToggle
+                  selected={selectedCurrency}
+                  onChange={setSelectedCurrency}
+                />
               </div>
               {error && (
-                <p
-                  id={`${provider}-err`}
-                  role="alert"
-                  className="mt-1 text-xs font-medium text-bkash"
-                >
+                <p id={`${provider}-err`} role="alert" className="mt-1 text-xs font-medium text-bkash">
                   {ERROR_COPY[error]}
                 </p>
               )}
@@ -226,26 +235,34 @@ export function ProviderBalanceCard({
               className="block w-full text-left transition hover:opacity-80 disabled:cursor-not-allowed"
               aria-label={
                 balance !== undefined
-                  ? `Current balance ${formatBDT(balance)}. Tap to update.`
+                  ? `Current balance. Tap to update.`
                   : `No balance recorded yet for ${PROVIDER_LABEL[provider]}. Tap to add one.`
               }
             >
               <div className="flex items-end justify-between gap-3">
                 <div className="min-w-0 flex-1">
-                  <span className="num block text-3xl font-semibold text-ink sm:text-4xl">
-                    {balance !== undefined ? formatBDT(displayBalance) : "—"}
-                  </span>
-                  <div className="mt-1 flex items-center gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="num block text-3xl font-semibold text-ink sm:text-4xl">
+                      {balance !== undefined
+                        ? entryCurrency === "USD"
+                          ? formatUsd(balance)
+                          : formatBDT(displayBalance)
+                        : "—"}
+                    </span>
+                  </div>
+                  <div className="mt-1 flex items-center gap-2 flex-wrap">
+                    {entryCurrency === "USD" && bdtEquivalent != null && (
+                      <span className="num text-xs text-muted">
+                        {formatBdtEquivalent(bdtEquivalent)}
+                      </span>
+                    )}
                     <span className="block text-xs text-muted">
                       {lastUpdated
                         ? `Updated ${formatRelative(lastUpdated) || "moments ago"}`
                         : "No entries yet"}
                     </span>
                     {balance !== undefined && (
-                      <DeltaPctBadge
-                        points={series ?? []}
-                        windowDays={7}
-                      />
+                      <DeltaPctBadge points={series ?? []} windowDays={7} />
                     )}
                   </div>
                 </div>
@@ -268,6 +285,45 @@ export function ProviderBalanceCard({
     </section>
   );
 }
+
+/* ── Currency Toggle ──────────────────────────────────────────────── */
+
+function CurrencyToggle({
+  selected,
+  onChange,
+}: {
+  selected: Currency;
+  onChange: (c: Currency) => void;
+}) {
+  return (
+    <div className="flex flex-none items-center gap-0.5 rounded-md border border-border bg-surface-2 p-0.5">
+      <button
+        type="button"
+        onClick={() => onChange("BDT")}
+        className={`rounded px-1.5 py-0.5 text-[10px] font-semibold transition ${
+          selected === "BDT"
+            ? "bg-signal text-ink"
+            : "text-muted hover:text-ink"
+        }`}
+      >
+        BDT
+      </button>
+      <button
+        type="button"
+        onClick={() => onChange("USD")}
+        className={`rounded px-1.5 py-0.5 text-[10px] font-semibold transition ${
+          selected === "USD"
+            ? "bg-signal text-ink"
+            : "text-muted hover:text-ink"
+        }`}
+      >
+        USD
+      </button>
+    </div>
+  );
+}
+
+/* ── Icons ────────────────────────────────────────────────────────── */
 
 function CheckIcon() {
   return (

@@ -18,9 +18,15 @@ import { useCountUp } from "./useCountUp";
 interface TotalBalanceHeaderProps {
   total: number;
   lastUpdatedAt: string | undefined;
+  /** Whether any provider has a non-BDT balance entry. */
+  includesForeignCurrency?: boolean;
 }
 
-export function TotalBalanceHeader({ total, lastUpdatedAt }: TotalBalanceHeaderProps) {
+export function TotalBalanceHeader({
+  total,
+  lastUpdatedAt,
+  includesForeignCurrency = false,
+}: TotalBalanceHeaderProps) {
   const rel = lastUpdatedAt ? formatRelative(lastUpdatedAt) : "—";
   // Longer duration on the hero number — feels deliberate, not twitchy.
   const animated = useCountUp(total, 750);
@@ -36,6 +42,11 @@ export function TotalBalanceHeader({ total, lastUpdatedAt }: TotalBalanceHeaderP
         <span className="num">
           {lastUpdatedAt ? `updated ${rel}` : "awaiting first entry"}
         </span>
+        {includesForeignCurrency && (
+          <span className="ml-2 inline-flex items-center gap-1 text-[10px] font-semibold text-signal">
+            · Includes USD amounts
+          </span>
+        )}
       </p>
     </header>
   );

@@ -20,6 +20,10 @@ import type { ReactNode } from "react";
 import { ThemeToggle } from "@/features/shell/ThemeToggle";
 import { DemoBadge } from "@/features/shell/DemoBadge";
 import { PersonaSwitcher } from "@/features/shell/PersonaSwitcher";
+import { NavTabs } from "@/features/shell/NavTabs";
+import { ExportButton } from "@/features/export/ExportButton";
+import { NotificationSettings } from "@/features/notifications/NotificationSettings";
+import { DemoPreviewToggle } from "@/features/demo";
 import type { MetaSnapshot, PersonaName } from "@/lib/metaTypes";
 
 interface AppShellProps {
@@ -53,14 +57,34 @@ export function AppShell({ children, meta, onPersonaSwitched }: AppShellProps) {
             </div>
           </div>
           <div className="flex flex-none items-center gap-2">
+            <NotificationSettings />
+            <ExportButton />
             <PersonaSwitcher current={persona} onSwitched={onPersonaSwitched} />
             <ThemeToggle />
           </div>
         </div>
+        <NavTabs />
       </header>
       <main className="mx-auto w-full max-w-screen-md flex-1 px-3 py-4 sm:px-5 sm:py-6">
         {children}
       </main>
+
+      {/* Footer attribution */}
+      <footer className="border-t border-border py-2.5 text-center">
+        <p className="text-[10px] leading-relaxed text-muted">
+          UI Developed by{" "}
+          <a
+            href="https://github.com/bikash-20"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-semibold text-ink transition hover:text-signal"
+          >
+            Bikash Talukder
+          </a>
+        </p>
+      </footer>
+
+      <DemoPreviewToggle />
     </div>
   );
 }

@@ -52,7 +52,7 @@ export interface PersonaSpec {
   label: string;
   description: string;
   baseline: Record<Provider, number>;
-  /** Per-day random jitter (BDT, +/-). */
+  /** Per-day random jitter (+/-), in the account's currency. */
   volatility: Record<Provider, number>;
   /** Per-day drift toward cash-out (negative) or cash-in (positive). */
   drift: Record<Provider, number>;
@@ -61,6 +61,10 @@ export interface PersonaSpec {
   spikeRange: [number, number];
   /** Which providers receive the spike bump on a payday day. */
   spikeProviders: Provider[];
+  /** Per-provider currency. Defaults to 'BDT' when absent. */
+  currency?: Partial<Record<Provider, 'BDT' | 'USD'>>;
+  /** USD→BDT exchange rate used for USD entries. Ignored for BDT. */
+  usdExchangeRate?: number;
 }
 
 export interface SeedResult {
@@ -82,13 +86,16 @@ export const PERSONA_SEEDS: Record<PersonaName, PersonaSpec> = {
     label: "Freelancer",
     description:
       "Mixed inflows from freelance projects, steady daily outflows. " +
-      "Rocket used as the savings stash.",
+      "bKash receives USD payments. Rocket used as the savings stash.",
     baseline: { bkash: 8500, nagad: 4200, rocket: 24000 },
     volatility: { bkash: 600, nagad: 350, rocket: 900 },
     drift: { bkash: -120, nagad: -80, rocket: 80 },
     spikeChance: 0.13,
     spikeRange: [3500, 9000],
     spikeProviders: ["bkash", "rocket"],
+    // bKash receives USD freelance payments; Nagad and Rocket stay BDT.
+    currency: { bkash: "USD" },
+    usdExchangeRate: 110,
   },
   small_business: {
     name: "small_business",
@@ -169,6 +176,10 @@ interface SeededEntry {
   provider: Provider;
   balance: number;
   timestamp: number;
+  /** Currency of this entry. Omitted means BDT. */
+  currency?: 'BDT' | 'USD';
+  /** USD→BDT exchange rate at entry time. Non-null only for USD entries. */
+  exchangeRate?: number | null;
 }
 
 function generateEntries(
@@ -180,13 +191,17 @@ function generateEntries(
   const balance: Record<Provider, number> = { ...config.baseline };
   const rand = mulberry32(hashSeed(`walletsync-demo:${config.name}`));
 
+  // Determine per-provider currency (default BDT).
+  const currencyConfig: Record<Provider, 'BDT' | 'USD'> = {
+    bkash: config.currency?.bkash ?? 'BDT',
+    nagad: config.currency?.nagad ?? 'BDT',
+    rocket: config.currency?.rocket ?? 'BDT',
+  };
+
   for (let d = days - 1; d >= 0; d--) {
     const dayTimestamp = now - d * 24 * 60 * 60 * 1000;
     const dayDate = new Date(dayTimestamp);
 
-    // Payday/spike day? Skip day 0 so the "now" entry isn't a spike
-    // (we want the user's most recent balance to look like a normal
-    // edit, not a just-arrived payday).
     const isSpikeDay =
       d !== 0 && rand() < config.spikeChance && d % 2 === 0;
     const spikeProvider = isSpikeDay ? pick(rand, config.spikeProviders) : null;
@@ -198,8 +213,6 @@ function generateEntries(
     const entryCount = baseCount + extraCount;
 
     for (let e = 0; e < entryCount; e++) {
-      // Pull the balance toward the persona baseline + apply daily drift
-      // + random jitter, per provider.
       for (const provider of PROVIDERS) {
         const pullToBaseline =
           (config.baseline[provider] - balance[provider]) * 0.04;
@@ -212,18 +225,10 @@ function generateEntries(
         balance[provider] = Math.max(0, balance[provider] + drift);
       }
 
-      // If this is a payday day + this provider + the first entry of
-      // the day, bump the balance by the spike amount.
-      if (
-        isSpikeDay &&
-        spikeProvider !== null &&
-        e === 0
-      ) {
+      if (isSpikeDay && spikeProvider !== null && e === 0) {
         balance[spikeProvider] += spikeAmount;
       }
 
-      // Lay the entry down across the day. First entry at ~09:00,
-      // extras later. Last entry's timestamp clamped to `now`.
       const hour = Math.min(
         23,
         9 + Math.floor((24 / (entryCount + 1)) * (e + 1)),
@@ -233,11 +238,17 @@ function generateEntries(
       const epochMs = Math.min(ts.getTime(), now);
 
       for (const provider of PROVIDERS) {
-        out.push({
+        const entryCurrency = currencyConfig[provider];
+        const entry: SeededEntry = {
           provider,
           balance: Math.round(balance[provider] * 100) / 100,
           timestamp: epochMs,
-        });
+        };
+        if (entryCurrency === 'USD') {
+          entry.currency = 'USD';
+          entry.exchangeRate = config.usdExchangeRate ?? 110;
+        }
+        out.push(entry);
       }
     }
   }
@@ -314,8 +325,9 @@ export function seedDemo(
     );
     const insertEntry = db.prepare(
       `INSERT INTO balance_entries
-         (persona_id, provider_id, balance, source, transfer_id, ts)
-       VALUES (?, ?, ?, 'seed', NULL, ?)`,
+         (persona_id, provider_id, balance, source, transfer_id, ts,
+          currency, exchange_rate)
+       VALUES (?, ?, ?, 'seed', NULL, ?, ?, ?)`,
     );
     const upsertMeta = db.prepare(
       "INSERT INTO meta (key, value) VALUES (?, ?) " +
@@ -364,11 +376,17 @@ export function seedDemo(
 
       // 5. Insert the history rows.
       for (const e of entries) {
+        const entryCurrency = e.currency ?? 'BDT';
+        const entryRate = entryCurrency === 'USD' && e.exchangeRate != null
+          ? e.exchangeRate
+          : null;
         insertEntry.run(
           config.name,
           e.provider,
           bdtToPaise(e.balance),
           e.timestamp,
+          entryCurrency,
+          entryRate,
         );
       }
 

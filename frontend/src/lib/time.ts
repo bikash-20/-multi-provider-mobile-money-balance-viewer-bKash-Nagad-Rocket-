@@ -49,3 +49,14 @@ export function formatBDT(n: number): string {
   const withCommas = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
   return `৳${withCommas}.${decPart}`;
 }
+
+/**
+ * Format an ISO date string (YYYY-MM-DD) to a short label like "Jan 5".
+ * Returns the raw string if parsing fails.
+ */
+export function formatDayShort(iso: string): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  if (!y || !m || !d) return iso;
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${months[m - 1]} ${d}`;
+}

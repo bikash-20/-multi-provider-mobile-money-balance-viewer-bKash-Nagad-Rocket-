@@ -10,9 +10,14 @@
  * still owns local state for the duration of a session; the new
  * `remove_entry` action exists so the page can roll back an optimistic
  * append if the POST fails.
+ *
+ * Multi-currency (Phase 4): the `update_balance` action now carries
+ * optional `currency` and `exchangeRateBdt` fields so the optimistic
+ * entry preserves the currency of the balance the user entered.
  */
 
 import type { AppState, BalanceEntry, Provider } from "./types";
+import type { Currency } from "@/features/currency/types";
 
 export type Action =
   | { type: "set_entries"; entries: BalanceEntry[] }
@@ -22,6 +27,8 @@ export type Action =
       balance: number;
       timestamp: string;
       id: string;
+      currency?: Currency;
+      exchangeRateBdt?: number | null;
     }
   | { type: "remove_entry"; id: string }
   /** Phase 10: append the next keyset page of older entries to the
@@ -29,8 +36,7 @@ export type Action =
    *  between two requests can't double-render. */
   | { type: "append_entries"; entries: BalanceEntry[] };
 
-/** Empty initial state — the server provides the entries on first GET.
- *  Anything else here would be lying on the first render. */
+/** Empty initial state — the server provides the entries on first GET. */
 export const initialState: AppState = {
   entries: [],
 };
@@ -38,7 +44,6 @@ export const initialState: AppState = {
 export function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
     case "set_entries": {
-      // Server is authoritative; replace whatever was here.
       return { entries: action.entries };
     }
     case "update_balance": {
@@ -48,22 +53,21 @@ export function reducer(state: AppState, action: Action): AppState {
         balance: action.balance,
         timestamp: action.timestamp,
       };
-      // Newest entries first — keeps the log readable and matches the
-      // "prepend a row to Recent Entries" behaviour from section 5.
+      // Preserve currency info for the optimistic entry.
+      if (action.currency && action.currency !== "BDT") {
+        entry.currency = action.currency;
+        if (action.exchangeRateBdt != null) {
+          entry.exchangeRateBdt = action.exchangeRateBdt;
+        }
+      }
       return { entries: [entry, ...state.entries] };
     }
     case "remove_entry": {
-      // Used for optimistic-rollback when the POST to /api/entries fails.
       return {
         entries: state.entries.filter((e) => e.id !== action.id),
       };
     }
     case "append_entries": {
-      // Server returns rows in ts DESC order. We're appending to the
-      // tail, which is also the oldest end of the list, so we just
-      // concat — but only rows we haven't seen yet. The page's
-      // dispatch site also guards, but the reducer's own dedupe
-      // makes this safe to call from anywhere (tests, retries, …).
       if (action.entries.length === 0) return state;
       const seen = new Set(state.entries.map((e) => e.id));
       const additions = action.entries.filter((e) => !seen.has(e.id));

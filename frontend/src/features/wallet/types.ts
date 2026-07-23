@@ -6,6 +6,8 @@
  * (e.g. "My bKash"), never a phone number / NID / real name.
  */
 
+import type { Currency } from "@/features/currency/types";
+
 export type Provider = "bkash" | "nagad" | "rocket";
 
 /** All three providers are tracked. The order here defines the render
@@ -43,8 +45,14 @@ export const PROVIDER_HEX: Record<Provider, string> = {
 export interface BalanceEntry {
   id: string;
   provider: Provider;
-  /** New balance as of `timestamp`. */
+  /** New balance as of `timestamp`, in the entry's currency. */
   balance: number;
+  /** Currency of this entry. Defaults to 'BDT' when absent. */
+  currency?: Currency;
+  /** BDT exchange rate at entry time (BDT per 1 USD). Non-null only
+   *  when currency is 'USD'. Used to compute the BDT-equivalent for
+   *  totals and charts. */
+  exchangeRateBdt?: number | null;
   /** ISO 8601 timestamp string. */
   timestamp: string;
 }
