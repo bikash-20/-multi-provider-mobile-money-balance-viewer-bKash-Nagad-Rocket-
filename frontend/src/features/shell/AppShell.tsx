@@ -72,7 +72,7 @@ export function AppShell({ children, meta, onPersonaSwitched }: AppShellProps) {
       {/* Footer attribution */}
       <footer className="border-t border-border py-2.5 text-center">
         <p className="text-[10px] leading-relaxed text-muted">
-          UI Developed by{" "}
+          Developed by{" "}
           <a
             href="https://github.com/bikash-20"
             target="_blank"

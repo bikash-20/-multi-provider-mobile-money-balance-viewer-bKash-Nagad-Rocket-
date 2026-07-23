@@ -3,7 +3,7 @@
 > Track, analyze, and forecast your bKash, Nagad, and Rocket balances in one place.  
 > A Next.js SPA with zero external UI dependencies — hand-rolled SVG charts, zustand state management, and SQLite persistence.
 
-**UI Developed by [Bikash Talukder](https://github.com/bikash-20)**
+**Developed by [Bikash Talukder](https://github.com/bikash-20)**
 
 ---
 
@@ -552,7 +552,7 @@ See the [LICENSE](./LICENSE) file for details.
 ---
 
 <div align="center">
-  <strong>UI Developed by <a href="https://github.com/bikash-20">Bikash Talukder</a></strong>
+  <strong>Developed by <a href="https://github.com/bikash-20">Bikash Talukder</a></strong>
   <br />
   <sub>Built with Next.js, TypeScript, SQLite, and Tailwind CSS</sub>
 </div>
